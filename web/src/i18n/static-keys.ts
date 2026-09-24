@@ -91,6 +91,10 @@ export const STATIC_I18N_KEYS = [
   'Connect to self-hosted models served by vLLM',
   'vLLM server address, without /v1',
   'vLLM API key, or EMPTY if authentication is disabled',
+  'OpenCode Zen',
+  'OpenCode Go',
+  'Access OpenCode Zen models through the OpenCode gateway, with per-model protocol routing',
+  'Access OpenCode Go models through the OpenCode gateway, with per-model protocol routing',
 
   'Price per image',
   'Per image',

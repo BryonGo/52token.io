@@ -196,6 +196,29 @@ func TestFetchOrdinaryOpenAIModelsKeepsExistingEmptyDataBehavior(t *testing.T) {
 	require.Empty(t, models)
 }
 
+func TestFetchOpenCodeModelsUsesDefaultV1ModelsEndpoint(t *testing.T) {
+	var gotPath string
+	var gotAuthorization string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuthorization = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"gpt-6-luna"},{"id":" glm-5.3 "},{"id":""}]}`))
+	}))
+	defer server.Close()
+
+	baseURL := server.URL
+	channel := &model.Channel{
+		Type:    constant.ChannelTypeOpenCodeGo,
+		Key:     "opencode-key",
+		BaseURL: &baseURL,
+	}
+	models, err := fetchChannelUpstreamModelIDs(channel)
+	require.NoError(t, err)
+	assert.Equal(t, "/v1/models", gotPath)
+	assert.Equal(t, "Bearer opencode-key", gotAuthorization)
+	assert.Equal(t, []string{"gpt-6-luna", "glm-5.3"}, models)
+}
+
 func TestFetchModelsAdvancedCustomCreatePreview(t *testing.T) {
 	receivedAuthorization := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -40,7 +40,9 @@ func OpenCodeProtocolForModel(model string) OpenCodeProtocol {
 	switch {
 	case strings.HasPrefix(model, "gemini-"):
 		return OpenCodeProtocolGemini
-	case strings.HasPrefix(model, "claude-"), strings.HasPrefix(model, "qwen"):
+	case strings.HasPrefix(model, "claude-"),
+		strings.HasPrefix(model, "qwen"),
+		strings.HasPrefix(model, "minimax-"):
 		return OpenCodeProtocolMessages
 	case strings.HasPrefix(model, "gpt-"), strings.HasPrefix(model, "grok-"), strings.HasPrefix(model, "muse-spark-"):
 		return OpenCodeProtocolResponses

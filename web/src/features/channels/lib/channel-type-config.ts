@@ -18,6 +18,8 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import {
   CHANNEL_TYPES,
+  CHANNEL_TYPE_OPENCODE_GO,
+  CHANNEL_TYPE_OPENCODE_ZEN,
   CHANNEL_TYPE_VLLM,
   CHANNEL_TYPE_SGLANG,
 } from '../constants'
@@ -179,6 +181,16 @@ export const CHANNEL_TYPE_CONFIGS: Record<number, ChannelTypeConfig> = {
       key: 'Enter API key for this channel',
       models: 'Models',
     },
+  },
+  [CHANNEL_TYPE_OPENCODE_ZEN]: {
+    id: CHANNEL_TYPE_OPENCODE_ZEN,
+    name: CHANNEL_TYPES[CHANNEL_TYPE_OPENCODE_ZEN],
+    icon: 'OpenCode',
+  },
+  [CHANNEL_TYPE_OPENCODE_GO]: {
+    id: CHANNEL_TYPE_OPENCODE_GO,
+    name: CHANNEL_TYPES[CHANNEL_TYPE_OPENCODE_GO],
+    icon: 'OpenCode',
   },
 }
 

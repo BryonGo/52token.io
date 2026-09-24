@@ -21,12 +21,6 @@ const (
 	OpenCodeProtocolUnsupported OpenCodeProtocol = "unsupported"
 )
 
-// openCodeProtocolOverrides pins models whose documented endpoint does not match
-// their name prefix. Keep this empty while every documented id follows its
-// family prefix; add an entry only when OpenCode serves a model on a different
-// endpoint than its prefix suggests.
-var openCodeProtocolOverrides = map[string]OpenCodeProtocol{}
-
 // OpenCodeProtocolForModel maps an upstream model id to its documented endpoint
 // protocol. OpenCode serves each model family on a fixed endpoint, so the family
 // prefix is the routing key. Unknown ids fall back to the OpenAI-compatible chat
@@ -34,9 +28,6 @@ var openCodeProtocolOverrides = map[string]OpenCodeProtocol{}
 // that is not yet listed here.
 func OpenCodeProtocolForModel(model string) OpenCodeProtocol {
 	model = strings.ToLower(strings.TrimSpace(model))
-	if protocol, ok := openCodeProtocolOverrides[model]; ok {
-		return protocol
-	}
 	switch {
 	case strings.HasPrefix(model, "gemini-"):
 		return OpenCodeProtocolGemini

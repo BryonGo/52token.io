@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -965,8 +966,129 @@ func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, test
 		summary.Enabled++
 	}
 
+	// Model-level auto on/off: only when the channel itself passed its health
+	// check and is enabled. Dead models are pruned from routing; recovered ones
+	// are restored, so /v1/models only exposes usable models.
+	if newAPIError == nil && isChannelEnabled {
+		testModelsForHealthCheck(ctx, channel, testUserID)
+	}
+
 	channel.UpdateResponseTime(milliseconds)
 	return summary
+}
+
+// billableGenerationModel reports whether a model name routes to an endpoint
+// that spends real money on generation (image / video / speech). Those are never
+// exercised by the automatic model health check, because generating an output
+// would incur upstream cost; they keep whatever state they already have.
+func billableGenerationModel(model string) bool {
+	lower := strings.ToLower(model)
+	for _, marker := range [...]string{
+		"seedream", "dall-e", "dall_e", "gpt-image", "gpt_image", "flux",
+		"imagen", "stable-diffusion", "stable_diffusion", "midjourney",
+		"mj-", "sora", "veo", "kling", "vidu", "jimeng", "hunyuan-video",
+		"t2v", "i2v", "text-to-video", "image-to-video", "tts", "whisper",
+		"speech", "voice", "audio", "music", "suno", "minimax-video",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// testModelsForHealthCheck probes each candidate model on a live channel and
+// prunes the ones that fail. Candidates are the current channel models plus any
+// previously disabled models (kept in other_info), so a model that recovers is
+// automatically restored. Only text-capable endpoints are probed; billable
+// generation models are left untouched.
+func testModelsForHealthCheck(ctx context.Context, channel *model.Channel, testUserID int) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	candidates := channel.GetModels()
+	if len(candidates) == 0 {
+		return
+	}
+	// Merge previously disabled models back into the candidate pool so they can
+	// be re-shelved when they recover.
+	otherInfo := channel.GetOtherInfo()
+	if raw, ok := otherInfo["disabled_models"].([]any); ok {
+		for _, v := range raw {
+			if s, ok := v.(string); ok && s != "" && !slices.Contains(candidates, s) {
+				candidates = append(candidates, s)
+			}
+		}
+	}
+
+	alive := make([]string, 0, len(candidates))
+	disabled := make([]string, 0)
+	for _, m := range candidates {
+		if ctx.Err() != nil {
+			// Do not persist a partial result mid-shutdown; leave state as-is.
+			return
+		}
+		if billableGenerationModel(m) {
+			// Never probe generation models; keep their current availability.
+			if slices.Contains(channel.GetModels(), m) {
+				alive = append(alive, m)
+			}
+			continue
+		}
+		r := testChannel(ctx, channel, testUserID, m, "", false)
+		if r.newAPIError == nil {
+			alive = append(alive, m)
+		} else {
+			disabled = append(disabled, m)
+		}
+	}
+
+	newModels := strings.Join(alive, ",")
+	// Preserve the original model ordering for the still-alive subset so a routine
+	// check that only drops/re-adds tail models does not churn the stored string.
+	updates := map[string]any{}
+	if newModels != channel.Models {
+		updates["models"] = newModels
+	}
+
+	newInfo := channel.GetOtherInfo()
+	if len(disabled) == 0 {
+		if _, present := newInfo["disabled_models"]; present {
+			delete(newInfo, "disabled_models")
+			channel.SetOtherInfo(newInfo)
+			updates["other_info"] = channel.OtherInfo
+		}
+	} else {
+		cur, _ := newInfo["disabled_models"].([]string)
+		if raw, ok := newInfo["disabled_models"].([]any); ok {
+			cur = make([]string, 0, len(raw))
+			for _, v := range raw {
+				if s, ok := v.(string); ok {
+					cur = append(cur, s)
+				}
+			}
+		}
+		if !slices.Equal(cur, disabled) {
+			newInfo["disabled_models"] = disabled
+			channel.SetOtherInfo(newInfo)
+			updates["other_info"] = channel.OtherInfo
+		}
+	}
+
+	if len(updates) == 0 {
+		return
+	}
+	if err := model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Updates(updates).Error; err != nil {
+		common.SysError(common.LogText("model health check: failed to persist channel %d: %v", channel.Id, err))
+		return
+	}
+	if _, modelsChanged := updates["models"]; modelsChanged {
+		if err := channel.UpdateAbilities(nil); err != nil {
+			common.SysError(common.LogText("model health check: failed to update abilities for channel %d: %v", channel.Id, err))
+		}
+		model.InitChannelCache()
+	}
+	common.SysLog(common.LogText("model health check: channel %d kept %d models, disabled %d", channel.Id, len(alive), len(disabled)))
 }
 
 // runChannelTestWorkers executes independent channel tests with bounded

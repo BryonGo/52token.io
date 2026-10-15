@@ -39,6 +39,7 @@ import {
   editTagChannels,
   testAllChannels,
   updateAllChannelsBalance,
+  updateChannelBalance,
 } from '../api'
 import { CHANNEL_STATUS, ERROR_MESSAGES, SUCCESS_MESSAGES } from '../constants'
 import type { ChannelTestResponse, CopyChannelParams } from '../types'
@@ -302,29 +303,38 @@ export async function handleTestChannel(
     const responseTime = getChannelTestResponseTime(response)
     const duration = formatChannelTestDuration(responseTime)
     const target = getChannelTestLabel(options)
+    // The connection test also refreshes model availability, so an unhealthy
+    // model is parked instead of the channel being disabled.
+    const modelNote = response.models?.disabled
+      ? i18next.t('{{count}} model(s) removed from routing', {
+          count: response.models.disabled,
+        })
+      : ''
     if (response.success) {
       if (!options?.silent) {
-        toast.success(
-          i18next.t('{{target}} test succeeded', { target }),
+        const details = [
           duration
-            ? {
-                description: i18next.t('Response time: {{duration}}', {
-                  duration,
-                }),
-              }
-            : undefined
-        )
+            ? i18next.t('Response time: {{duration}}', { duration })
+            : '',
+          modelNote,
+        ]
+          .filter(Boolean)
+          .join(' · ')
+        toast.success(i18next.t('{{target}} test succeeded', { target }), {
+          description: details || undefined,
+        })
       }
       onTestComplete?.(true, responseTime)
     } else {
       const errorMsg =
         getServerMessage(response) || i18next.t(ERROR_MESSAGES.TEST_FAILED)
       if (!options?.silent) {
+        const described = response.error_code
+          ? `${errorMsg} (${response.error_code})`
+          : errorMsg
         handleServerError(response, undefined, {
           title: i18next.t('{{target}} test failed', { target }),
-          description: response.error_code
-            ? `${errorMsg} (${response.error_code})`
-            : errorMsg,
+          description: modelNote ? `${described} · ${modelNote}` : described,
         })
       }
       onTestComplete?.(false, responseTime, errorMsg, response.error_code)
@@ -653,6 +663,67 @@ export async function handleTestAllChannels(
     }
   } catch (error) {
     handleServerError(error, i18next.t('Failed to test all channels'))
+  }
+}
+
+/**
+ * Update the balance of the selected channels. Each channel is queried on its
+ * own because the upstream request, and its failure reason, are per channel.
+ */
+export async function handleBatchUpdateBalance(
+  ids: number[],
+  queryClient?: QueryClient,
+  onSuccess?: () => void
+): Promise<void> {
+  if (ids.length === 0) {
+    toast.error(i18next.t('No channels selected'))
+    return
+  }
+
+  const results = await Promise.allSettled(
+    ids.map((id) => updateChannelBalance(id))
+  )
+  const failureReasons: string[] = []
+  let successCount = 0
+
+  for (const result of results) {
+    if (result.status === 'rejected') {
+      failureReasons.push(
+        getServerMessage(result.reason) ??
+          i18next.t('Failed to update channel balances')
+      )
+      continue
+    }
+
+    if (result.value?.success === false) {
+      failureReasons.push(
+        getServerMessage(result.value) ??
+          i18next.t('Failed to update channel balances')
+      )
+      continue
+    }
+
+    successCount += 1
+  }
+
+  const failCount = ids.length - successCount
+
+  if (successCount > 0) {
+    queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+    toast.success(
+      i18next.t('{{count}} channel balance(s) updated', { count: successCount })
+    )
+    onSuccess?.()
+  }
+
+  if (failCount > 0) {
+    const reasons = [...new Set(failureReasons)].slice(0, 3).join('; ')
+    toast.error(
+      i18next.t('{{count}} channel balance(s) failed to update', {
+        count: failCount,
+      }),
+      reasons ? { description: reasons } : undefined
+    )
   }
 }
 

@@ -141,6 +141,7 @@ import {
   CLAUDE_FIELD_PASSTHROUGH_TYPES,
   CHANNEL_STATUS_LABELS,
   CHANNEL_TYPE_NEW_API,
+  CHANNEL_TYPE_NEW_API_LEGACY,
   CHANNEL_TYPE_OLLAMA,
   CHANNEL_TYPE_OPTIONS,
   CHANNEL_TYPE_TASK_PLUGIN,
@@ -292,6 +293,7 @@ const SENSITIVE_FORM_FIELDS = [
   'advanced_custom',
   'is_enterprise_account',
   'vertex_key_type',
+  'vertex_project_id',
   'aws_key_type',
   'azure_responses_version',
   'force_format',
@@ -304,6 +306,8 @@ const SENSITIVE_FORM_FIELDS = [
   'responses_websocket_enabled',
   'system_prompt',
   'system_prompt_override',
+  'super_key',
+  'super_key_user_id',
   'allow_service_tier',
   'disable_store',
   'allow_safety_identifier',
@@ -1863,6 +1867,68 @@ export function ChannelMutateDrawer({
         </FormItem>
       )}
     />
+  )
+
+  const newAPILegacyFields = (
+    <>
+      <FormField
+        control={form.control}
+        name='super_key'
+        render={({ field }) => (
+          <FormItem>
+            <FormLabel>{t('Super admin key')}</FormLabel>
+            <FormControl>
+              <Textarea
+                className='font-mono'
+                rows={2}
+                placeholder={
+                  isEditing
+                    ? t('Leave empty to keep the existing key')
+                    : t('Account-level access token of the upstream gateway')
+                }
+                {...field}
+              />
+            </FormControl>
+            <FormDescription>
+              {t(
+                'Used only to query the upstream account balance; relay requests keep using the API key above'
+              )}
+            </FormDescription>
+            <FormMessage />
+          </FormItem>
+        )}
+      />
+      <FormField
+        control={form.control}
+        name='super_key_user_id'
+        render={({ field }) => (
+          <FormItem>
+            <FormLabel>{t('Super admin key user ID')}</FormLabel>
+            <FormControl>
+              <Input
+                type='number'
+                placeholder='0'
+                {...field}
+                value={field.value ?? ''}
+                onChange={(event) =>
+                  field.onChange(
+                    event.target.value === ''
+                      ? undefined
+                      : Number(event.target.value)
+                  )
+                }
+              />
+            </FormControl>
+            <FormDescription>
+              {t(
+                'Filled only when the upstream station expects the New-Api-User header'
+              )}
+            </FormDescription>
+            <FormMessage />
+          </FormItem>
+        )}
+      />
+    </>
   )
 
   const passthroughFields = (
@@ -3918,6 +3984,29 @@ export function ChannelMutateDrawer({
                     </FormItem>
                   )}
                 />
+                {vertexKeyType === 'api_key' && (
+                  <FormField
+                    control={form.control}
+                    name='vertex_project_id'
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>{t('Vertex AI Project ID')}</FormLabel>
+                        <FormControl>
+                          <Input
+                            placeholder={t('e.g., my-project-123')}
+                            {...field}
+                          />
+                        </FormControl>
+                        <FormDescription>
+                          {t(
+                            'Optional. Without it, Google picks the region; with it, requests go to the deployment region below.'
+                          )}
+                        </FormDescription>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                )}
                 {vertexKeyType === 'json' && (
                   <FormItem>
                     <FormLabel>{t('Service account JSON file(s)')}</FormLabel>
@@ -4446,6 +4535,9 @@ export function ChannelMutateDrawer({
                   )
                 }}
               />
+
+              {currentType === CHANNEL_TYPE_NEW_API_LEGACY &&
+                newAPILegacyFields}
 
               {currentType === 57 && (
                 <div className='border-border/60 flex flex-col gap-3 border-y py-4'>

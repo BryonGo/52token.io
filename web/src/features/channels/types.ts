@@ -92,11 +92,16 @@ export interface ChannelSettings {
   http_protocol?: 'auto' | 'http1' | string
   http2_connection_shards?: number
   tls_insecure_skip_verify?: boolean
+  /** Account-level access token of a legacy New API gateway (balance queries only). */
+  super_key?: string
+  /** Upstream user id that owns the super admin key, when the station needs it. */
+  super_key_user_id?: number
 }
 
 export interface ChannelOtherSettings {
   azure_responses_version?: string
   vertex_key_type?: 'json' | 'api_key'
+  vertex_project_id?: string
   openrouter_enterprise?: boolean
   aws_key_type?: 'ak_sk' | 'api_key'
   allow_service_tier?: boolean
@@ -201,6 +206,11 @@ export interface ChannelTestResponse {
   data?: {
     response_time?: number
     error?: string
+  }
+  /** Model level result of the connection test; present when no model was pinned. */
+  models?: {
+    usable?: number
+    disabled?: number
   }
 }
 

@@ -67,10 +67,22 @@ func parseStatusFilter(statusParam string) int {
 }
 
 func clearChannelInfo(channel *model.Channel) {
+	if channel == nil {
+		return
+	}
 	if channel.ChannelInfo.IsMultiKey {
 		channel.ChannelInfo.MultiKeyDisabledReason = nil
 		channel.ChannelInfo.MultiKeyDisabledTime = nil
 	}
+	// The super admin key of a legacy New API channel is write-only: it is kept
+	// so balance queries can use it, but no management response returns it, just
+	// like the channel key.
+	setting := channel.GetSetting()
+	if setting.SuperKey == "" {
+		return
+	}
+	setting.SuperKey = ""
+	channel.SetSetting(setting)
 }
 
 func channelIDsFromChannels(channels []*model.Channel) []int {
@@ -597,6 +609,9 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 
 	if channel.Type == constant.ChannelTypeNewAPI && strings.TrimSpace(channel.GetBaseURL()) == "" {
 		return fmt.Errorf("New API channel base URL cannot be empty")
+	}
+	if channel.Type == constant.ChannelTypeNewAPILegacy && strings.TrimSpace(channel.GetBaseURL()) == "" {
+		return fmt.Errorf("New API (Legacy) channel base URL cannot be empty")
 	}
 	if channel.Type == constant.ChannelTypeVLLM && strings.TrimSpace(channel.GetBaseURL()) == "" {
 		return fmt.Errorf("vLLM channel base URL cannot be empty")
@@ -1132,6 +1147,21 @@ func UpdateChannel(c *gin.Context) {
 
 	// Always copy the original ChannelInfo so that fields like IsMultiKey and MultiKeySize are retained.
 	channel.ChannelInfo = originChannel.ChannelInfo
+
+	// The super admin key never travels back through the management API, so an
+	// edit that submits an empty value keeps the stored token.
+	if settingProvided {
+		setting := channel.GetSetting()
+		if strings.TrimSpace(setting.SuperKey) == "" {
+			if originSetting := originChannel.GetSetting(); originSetting.SuperKey != "" {
+				setting.SuperKey = originSetting.SuperKey
+				if setting.SuperKeyUserID == 0 {
+					setting.SuperKeyUserID = originSetting.SuperKeyUserID
+				}
+				channel.SetSetting(setting)
+			}
+		}
+	}
 
 	if channelHasSensitiveChanges(&channel, originChannel, requestData) &&
 		!authz.Can(c.GetInt("id"), c.GetInt("role"), authz.ChannelSensitiveWrite) {

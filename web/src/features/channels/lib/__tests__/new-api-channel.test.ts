@@ -21,6 +21,7 @@ import { describe, expect, test } from 'vitest'
 import type { TaskPluginOption } from '../../api'
 import {
   CHANNEL_TYPE_NEW_API,
+  CHANNEL_TYPE_NEW_API_LEGACY,
   CHANNEL_TYPE_VLLM,
   CHANNEL_TYPE_SGLANG,
   CHANNEL_TYPE_OPTIONS,
@@ -154,6 +155,79 @@ describe.each([
   })
 })
 
+describe('New API (Legacy) channel', () => {
+  const legacyForm = (extra: Record<string, unknown> = {}) => ({
+    ...CHANNEL_FORM_DEFAULT_VALUES,
+    name: 'Legacy gateway',
+    type: CHANNEL_TYPE_NEW_API_LEGACY,
+    base_url: 'https://legacy.example',
+    key: 'sk-relay-key',
+    models: 'gpt-5',
+    ...extra,
+  })
+
+  test('can be selected and reads the balance from the upstream account', () => {
+    expect(CHANNEL_TYPE_OPTIONS).toContainEqual({
+      value: CHANNEL_TYPE_NEW_API_LEGACY,
+      label: 'New API (Legacy)',
+    })
+    expect(MODEL_FETCHABLE_TYPES.has(CHANNEL_TYPE_NEW_API_LEGACY)).toBe(true)
+    expect(getChannelTypeIcon(CHANNEL_TYPE_NEW_API_LEGACY)).toBe('NewAPI')
+    expect(getChannelTypeConfig(CHANNEL_TYPE_NEW_API_LEGACY).icon).toBe(
+      'NewAPI'
+    )
+    expect(getKeyPromptForType(CHANNEL_TYPE_NEW_API_LEGACY)).toBe(
+      'Enter API key for this channel'
+    )
+  })
+
+  test('requires an upstream address and stores the super admin key in the settings', () => {
+    const blank = channelFormSchema.safeParse(legacyForm({ base_url: '  ' }))
+
+    expect(blank.success).toBe(false)
+    if (!blank.success) {
+      expect(blank.error.issues).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            path: ['base_url'],
+            message: 'Base URL is required for this channel type',
+          }),
+        ])
+      )
+    }
+
+    const payload = transformFormDataToCreatePayload(
+      channelFormSchema.parse(
+        legacyForm({
+          base_url: 'https://legacy.example/',
+          super_key: 'super-admin-token',
+          super_key_user_id: 11566,
+        })
+      )
+    )
+
+    expect(payload.channel).toMatchObject({
+      type: CHANNEL_TYPE_NEW_API_LEGACY,
+      base_url: 'https://legacy.example',
+      key: 'sk-relay-key',
+    })
+    expect(JSON.parse(payload.channel.setting ?? '{}')).toMatchObject({
+      super_key: 'super-admin-token',
+      super_key_user_id: 11566,
+    })
+  })
+
+  test('leaves the stored super admin key untouched when the field stays empty', () => {
+    const payload = transformFormDataToCreatePayload(
+      channelFormSchema.parse(legacyForm())
+    )
+
+    expect(JSON.parse(payload.channel.setting ?? '{}')).not.toHaveProperty(
+      'super_key'
+    )
+  })
+})
+
 describe('New API channel task plugin extensions', () => {
   const plugins: TaskPluginOption[] = [
     {
@@ -170,9 +244,9 @@ describe('New API channel task plugin extensions', () => {
       upstreams: ['new_api'],
     },
     {
-      key: 'hailuo',
-      name: 'Hailuo',
-      models: ['minimax'],
+      key: 'acme',
+      name: 'Acme',
+      models: ['acme-video'],
       upstreams: ['vendor'],
     },
   ]

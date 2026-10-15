@@ -17,8 +17,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useQueryClient } from '@tanstack/react-query'
-import { type Table } from '@tanstack/react-table'
-import { Power, PowerOff, Tag, Trash2 } from 'lucide-react'
+import type { Table } from '@tanstack/react-table'
+import { Power, PowerOff, RefreshCw, Tag, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -45,6 +45,7 @@ import {
   handleBatchDisable,
   handleBatchEnable,
   handleBatchSetTag,
+  handleBatchUpdateBalance,
 } from '../lib'
 import type { Channel } from '../types'
 
@@ -58,6 +59,7 @@ export function DataTableBulkActions<TData>({
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [showTagDialog, setShowTagDialog] = useState(false)
+  const [isUpdatingBalances, setIsUpdatingBalances] = useState(false)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [tagValue, setTagValue] = useState('')
   const currentUser = useAuthStore((s) => s.auth.user)
@@ -65,6 +67,11 @@ export function DataTableBulkActions<TData>({
     currentUser,
     ADMIN_PERMISSION_RESOURCES.CHANNEL,
     ADMIN_PERMISSION_ACTIONS.SENSITIVE_WRITE
+  )
+  const canOperate = hasPermission(
+    currentUser,
+    ADMIN_PERMISSION_RESOURCES.CHANNEL,
+    ADMIN_PERMISSION_ACTIONS.OPERATE
   )
 
   const selectedRows = table.getFilteredSelectedRowModel().rows
@@ -95,6 +102,14 @@ export function DataTableBulkActions<TData>({
     handleBatchDelete(selectedIds, queryClient, () => {
       setShowDeleteConfirm(false)
       handleClearSelection()
+    })
+  }
+
+  const handleUpdateBalances = () => {
+    if (!canOperate || isUpdatingBalances) return
+    setIsUpdatingBalances(true)
+    void handleBatchUpdateBalance(selectedIds, queryClient).finally(() => {
+      setIsUpdatingBalances(false)
     })
   }
 
@@ -148,6 +163,46 @@ export function DataTableBulkActions<TData>({
           </TooltipTrigger>
           <TooltipContent>
             <p>{t('Disable selected channels')}</p>
+          </TooltipContent>
+        </Tooltip>
+
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                variant='outline'
+                size='icon'
+                onClick={handleUpdateBalances}
+                disabled={!canOperate || isUpdatingBalances}
+                aria-disabled={!canOperate || isUpdatingBalances}
+                className={cn(
+                  'size-8',
+                  (!canOperate || isUpdatingBalances) &&
+                    'cursor-not-allowed opacity-50'
+                )}
+                aria-label={t('Update balance for selected channels')}
+                title={
+                  canOperate
+                    ? t('Update balance for selected channels')
+                    : t('No permission to perform this action')
+                }
+              />
+            }
+          >
+            <RefreshCw
+              className={cn(isUpdatingBalances && 'animate-spin')}
+              aria-hidden='true'
+            />
+            <span className='sr-only'>
+              {t('Update balance for selected channels')}
+            </span>
+          </TooltipTrigger>
+          <TooltipContent>
+            <p>
+              {canOperate
+                ? t('Update balance for selected channels')
+                : t('No permission to perform this action')}
+            </p>
           </TooltipContent>
         </Tooltip>
 

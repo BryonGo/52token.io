@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import {
   CHANNEL_TYPES,
+  CHANNEL_TYPE_NEW_API_LEGACY,
   CHANNEL_TYPE_OPENCODE_GO,
   CHANNEL_TYPE_OPENCODE_ZEN,
   CHANNEL_TYPE_VLLM,
@@ -175,6 +176,16 @@ export const CHANNEL_TYPE_CONFIGS: Record<number, ChannelTypeConfig> = {
   60: {
     id: 60,
     name: CHANNEL_TYPES[60],
+    icon: 'NewAPI',
+    hints: {
+      baseUrl: 'Base URL is required for this channel type',
+      key: 'Enter API key for this channel',
+      models: 'Models',
+    },
+  },
+  [CHANNEL_TYPE_NEW_API_LEGACY]: {
+    id: CHANNEL_TYPE_NEW_API_LEGACY,
+    name: CHANNEL_TYPES[CHANNEL_TYPE_NEW_API_LEGACY],
     icon: 'NewAPI',
     hints: {
       baseUrl: 'Base URL is required for this channel type',

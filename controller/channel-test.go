@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -875,6 +877,19 @@ func TestChannel(c *gin.Context) {
 	if c.Request != nil {
 		requestCtx = c.Request.Context()
 	}
+	pinnedModel := strings.TrimSpace(testModel) != ""
+	if !pinnedModel {
+		target, ok := channelHealthCheckTarget(channel)
+		if !ok {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "This channel only serves generation models; no probe was sent to avoid a charged output",
+				"time":    0.0,
+			})
+			return
+		}
+		testModel = target
+	}
 	result := testChannel(requestCtx, channel, testUserID, testModel, endpointType, isStream)
 	if result.localErr != nil {
 		resp := gin.H{
@@ -892,37 +907,91 @@ func TestChannel(c *gin.Context) {
 	milliseconds := tok.Sub(tik).Milliseconds()
 	go channel.UpdateResponseTime(milliseconds)
 	consumedTime := float64(milliseconds) / 1000.0
+
+	// The connection test reuses the model level probe of the automatic health
+	// check: unless the caller pinned one model, refresh which models answer
+	// instead of judging the whole channel by this single probe.
+	modelSummary := gin.H{}
+	if !pinnedModel && strings.TrimSpace(endpointType) == "" &&
+		channel.Status == common.ChannelStatusEnabled {
+		sweepCtx, cancelSweep := context.WithTimeout(requestCtx, manualModelProbeBudget)
+		usable, parked := refreshChannelModels(sweepCtx, channel, testUserID, maxModelProbesPerManualTest)
+		cancelSweep()
+		modelSummary = gin.H{"models": gin.H{"usable": usable, "disabled": parked}}
+	}
+
 	if result.newAPIError != nil {
-		c.JSON(http.StatusOK, gin.H{
+		resp := gin.H{
 			"success":    false,
 			"message":    result.newAPIError.Error(),
 			"time":       consumedTime,
 			"error_code": result.newAPIError.GetErrorCode(),
-		})
+		}
+		for key, value := range modelSummary {
+			resp[key] = value
+		}
+		c.JSON(http.StatusOK, resp)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
+	resp := gin.H{
 		"success": true,
 		"message": "",
 		"time":    consumedTime,
-	})
+	}
+	for key, value := range modelSummary {
+		resp[key] = value
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // channelTestSummary records the outcome of one channel test cycle so the
 // system task can persist a per-run result for history.
 type channelTestSummary struct {
-	Tested    int `json:"tested"`
-	Succeeded int `json:"succeeded"`
-	Failed    int `json:"failed"`
-	Disabled  int `json:"disabled"`
-	Enabled   int `json:"enabled"`
+	Tested         int `json:"tested"`
+	Succeeded      int `json:"succeeded"`
+	Failed         int `json:"failed"`
+	Disabled       int `json:"disabled"`
+	Enabled        int `json:"enabled"`
+	ModelsDisabled int `json:"models_disabled"`
 }
 
-func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, testUserID int, allowDisable bool, disableThreshold int64) channelTestSummary {
+// channelHealthCheckTarget reports which model the channel level health check
+// probes, and whether probing is allowed at all. Billable generation models are
+// never probed because a probe would produce a charged output, so a channel that
+// only serves them is left to the model sweep, which skips them as well. A test
+// model pinned on the channel counts as an explicit choice and is skipped too
+// when it is a generation model.
+func channelHealthCheckTarget(channel *model.Channel) (string, bool) {
+	if channel.TestModel != nil {
+		if pinned := strings.TrimSpace(*channel.TestModel); pinned != "" {
+			return pinned, !billableGenerationModel(pinned)
+		}
+	}
+	for _, model := range channel.GetModels() {
+		if !billableGenerationModel(model) {
+			return model, true
+		}
+	}
+	return "", false
+}
+
+// testChannelForHealthCheck runs one health check for a channel. Model health is
+// evaluated per model, so a single unhealthy model can no longer take down a
+// channel whose other models still answer: the channel is disabled only when no
+// model is left to serve it.
+func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, testUserID int, allowDisable bool) channelTestSummary {
 	summary := channelTestSummary{}
 	isChannelEnabled := channel.Status == common.ChannelStatusEnabled
+
+	probeModel, probeAllowed := channelHealthCheckTarget(channel)
+	if !probeAllowed {
+		// Never spend a generation output on a health check, and never change a
+		// channel's state on evidence this check refused to collect.
+		return summary
+	}
+
 	tik := time.Now()
-	result := testChannel(ctx, channel, testUserID, "", "", shouldUseStreamForAutomaticChannelTest(channel))
+	result := testChannel(ctx, channel, testUserID, probeModel, "", shouldUseStreamForAutomaticChannelTest(channel))
 	milliseconds := time.Since(tik).Milliseconds()
 	if ctx.Err() != nil {
 		return summary
@@ -930,29 +999,26 @@ func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, test
 
 	summary.Tested++
 
-	shouldBanChannel := false
 	newAPIError := result.newAPIError
-	if newAPIError != nil {
-		shouldBanChannel = service.ShouldDisableChannel(result.newAPIError)
-	}
-
-	if common.AutomaticDisableChannelEnabled && !shouldBanChannel {
-		if milliseconds > disableThreshold {
-			// The reason is stored with the channel and sent in the disable
-			// notice; no request states a language here.
-			err := errors.New(i18n.Translate("", i18n.MsgChannelResponseTimeExceeded, map[string]any{
-				"Seconds":   fmt.Sprintf("%.2f", float64(milliseconds)/1000.0),
-				"Threshold": fmt.Sprintf("%.2f", float64(disableThreshold)/1000.0),
-			}))
-			newAPIError = types.NewOpenAIError(err, types.ErrorCodeChannelResponseTimeExceeded, http.StatusRequestTimeout)
-			shouldBanChannel = true
-		}
-	}
-
 	if newAPIError == nil {
 		summary.Succeeded++
 	} else {
 		summary.Failed++
+	}
+
+	shouldBanChannel := false
+	if isChannelEnabled {
+		if newAPIError != nil && types.IsChannelError(newAPIError) {
+			// A credential level failure cannot be fixed by dropping models.
+			shouldBanChannel = true
+		} else {
+			// Whether the probe passed or failed, refresh model availability first:
+			// routing must only offer models that answered, and a failure caused by
+			// one bad model must not close the whole channel.
+			usable, parked := refreshChannelModels(ctx, channel, testUserID, maxModelProbesPerSweep)
+			summary.ModelsDisabled = parked
+			shouldBanChannel = newAPIError != nil && usable == 0
+		}
 	}
 
 	if allowDisable && isChannelEnabled && shouldBanChannel && channel.GetAutoBan() {
@@ -967,6 +1033,278 @@ func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, test
 
 	channel.UpdateResponseTime(milliseconds)
 	return summary
+}
+
+// billableGenerationModel reports whether a model name routes to an endpoint
+// that spends real money on generation (image / video / speech). Those are never
+// exercised by the automatic model health check, because generating an output
+// would incur upstream cost; they keep whatever state they already have.
+func billableGenerationModel(model string) bool {
+	lower := strings.ToLower(model)
+	for _, marker := range [...]string{
+		// Image generation.
+		"image", "dall-e", "dall_e", "seedream", "flux", "stable-diffusion",
+		"stable_diffusion", "midjourney", "mj-", "banana",
+		// Video generation.
+		"video", "sora", "veo", "kling", "vidu", "jimeng", "seedance",
+		"wan2", "wanx", "hailuo", "pika", "runway", "luma", "pixverse", "t2v", "i2v",
+		// Audio and speech.
+		"tts", "whisper", "speech", "voice", "audio", "music", "suno",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// maxModelProbesPerSweep bounds how many upstream probes an automatic sweep
+// spends per channel. A channel may list thousands of models, so an unbounded
+// sweep would send one request per model on every cycle. A bounded sweep starts
+// at a rotating offset, so successive cycles still cover the whole list.
+const maxModelProbesPerSweep = 20
+
+// maxModelProbesPerManualTest and manualModelProbeBudget keep the manual
+// connection test responsive: a click answers the probe the caller asked for and
+// then refreshes a bounded slice of the model list. The automatic cycle keeps
+// covering the rest of the list.
+const (
+	maxModelProbesPerManualTest = 20
+	manualModelProbeBudget      = 60 * time.Second
+)
+
+// maxModelFailuresBeforeParking is how many consecutive probe failures a routed
+// model may accumulate. The next failure parks it, so a model that fails
+// transiently keeps serving.
+const maxModelFailuresBeforeParking = 3
+
+// modelProbeFunc probes one model of a channel and returns the upstream error,
+// if any.
+type modelProbeFunc func(ctx context.Context, model string) *types.NewAPIError
+
+// modelProbeSweep is the outcome of probing a channel's models.
+type modelProbeSweep struct {
+	// Alive lists the models that keep serving.
+	Alive []string
+	// Disabled lists the models that are parked.
+	Disabled []string
+	// Failures counts consecutive probe failures per model that still serves.
+	Failures map[string]int
+	// Complete reports whether the sweep ran to the end; a cancelled sweep must
+	// not be persisted.
+	Complete bool
+}
+
+// readChannelDisabledModels returns the models parked by an earlier sweep.
+func readChannelDisabledModels(channel *model.Channel) []string {
+	raw, ok := channel.GetOtherInfo()["disabled_models"].([]any)
+	if !ok {
+		return nil
+	}
+	disabled := make([]string, 0, len(raw))
+	for _, value := range raw {
+		if parked, ok := value.(string); ok && parked != "" {
+			disabled = append(disabled, parked)
+		}
+	}
+	return disabled
+}
+
+// readChannelModelFailures returns the consecutive probe failures recorded for
+// the models that are still routed.
+func readChannelModelFailures(channel *model.Channel) map[string]int {
+	raw, ok := channel.GetOtherInfo()["model_failures"].(map[string]any)
+	if !ok {
+		return map[string]int{}
+	}
+	failures := make(map[string]int, len(raw))
+	for model, value := range raw {
+		if count, ok := value.(float64); ok && count > 0 {
+			failures[model] = int(count)
+		}
+	}
+	return failures
+}
+
+// sweepChannelModels probes the channel's models and reports which ones still
+// answer. A routed model is parked once it failed more than
+// maxModelFailuresBeforeParking consecutive probes, and a parked model that
+// answers is routed again. Models the sweep does not reach keep their current
+// state. Billable generation models are never probed, because producing an
+// output would be charged, and they keep whatever state they already have.
+func sweepChannelModels(ctx context.Context, channel *model.Channel, probe modelProbeFunc, limit int) modelProbeSweep {
+	current := channel.GetModels()
+	parked := readChannelDisabledModels(channel)
+	failures := readChannelModelFailures(channel)
+	if len(current) == 0 && len(parked) == 0 {
+		return modelProbeSweep{Complete: true}
+	}
+
+	// Probe order: models that already failed first, so a failure count keeps
+	// moving, then parked models so a recovery is noticed early, then the rest.
+	// A bounded sweep starts the remainder at a rotating offset so successive
+	// cycles still cover the whole list.
+	ordered := make([]string, 0, len(current)+len(parked))
+	for _, model := range current {
+		if failures[model] > 0 {
+			ordered = append(ordered, model)
+		}
+	}
+	for _, model := range parked {
+		if !slices.Contains(ordered, model) {
+			ordered = append(ordered, model)
+		}
+	}
+	rest := make([]string, 0, len(current)+len(parked))
+	for _, model := range append(append([]string{}, parked...), current...) {
+		if model != "" && !slices.Contains(ordered, model) && !slices.Contains(rest, model) {
+			rest = append(rest, model)
+		}
+	}
+	if len(ordered)+len(rest) > limit {
+		offset := int(common.GetTimestamp()/60) % len(rest)
+		rest = append(append(make([]string, 0, len(rest)), rest[offset:]...), rest[:offset]...)
+	}
+	ordered = append(ordered, rest...)
+
+	routed := make(map[string]bool, len(current))
+	for _, model := range current {
+		routed[model] = true
+	}
+
+	answered := make(map[string]bool, limit)
+	for _, model := range ordered {
+		if len(answered) >= limit {
+			break
+		}
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				if errors.Is(err, context.DeadlineExceeded) {
+					// The sweep ran out of its budget: keep what it learned.
+					break
+				}
+				// A cancelled runner must not persist a partial sweep.
+				return modelProbeSweep{}
+			}
+		}
+		if billableGenerationModel(model) {
+			continue
+		}
+		ok := probe(ctx, model) == nil
+		answered[model] = ok
+		if ok {
+			delete(failures, model)
+			continue
+		}
+		if routed[model] {
+			failures[model]++
+		}
+	}
+
+	// Rebuild the routing list in its stored order so a routine sweep that only
+	// drops or restores models does not churn the string.
+	sweep := modelProbeSweep{Complete: true}
+	for _, model := range current {
+		if ok, reached := answered[model]; reached && !ok && failures[model] > maxModelFailuresBeforeParking {
+			sweep.Disabled = append(sweep.Disabled, model)
+			continue
+		}
+		sweep.Alive = append(sweep.Alive, model)
+	}
+	for _, model := range parked {
+		ok, reached := answered[model]
+		if reached {
+			if ok && !slices.Contains(sweep.Alive, model) {
+				sweep.Alive = append(sweep.Alive, model)
+			} else if !ok {
+				sweep.Disabled = append(sweep.Disabled, model)
+			}
+			continue
+		}
+		if !slices.Contains(sweep.Alive, model) {
+			sweep.Disabled = append(sweep.Disabled, model)
+		}
+	}
+
+	// Only models that still serve keep a failure count; parked or removed models
+	// drop theirs.
+	sweep.Failures = make(map[string]int, len(failures))
+	for model, count := range failures {
+		if count > 0 && slices.Contains(sweep.Alive, model) {
+			sweep.Failures[model] = count
+		}
+	}
+	return sweep
+}
+
+// persistModelSweep stores the routing state a sweep produced. A sweep that
+// changes nothing does not touch the row.
+func persistModelSweep(channel *model.Channel, sweep modelProbeSweep) {
+	updates := map[string]any{}
+	if newModels := strings.Join(sweep.Alive, ","); newModels != channel.Models {
+		updates["models"] = newModels
+	}
+
+	newInfo := channel.GetOtherInfo()
+	infoChanged := false
+	if len(sweep.Disabled) == 0 {
+		if _, present := newInfo["disabled_models"]; present {
+			delete(newInfo, "disabled_models")
+			infoChanged = true
+		}
+	} else if !slices.Equal(readChannelDisabledModels(channel), sweep.Disabled) {
+		newInfo["disabled_models"] = sweep.Disabled
+		infoChanged = true
+	}
+	if len(sweep.Failures) == 0 {
+		if _, present := newInfo["model_failures"]; present {
+			delete(newInfo, "model_failures")
+			infoChanged = true
+		}
+	} else if !maps.Equal(readChannelModelFailures(channel), sweep.Failures) {
+		newInfo["model_failures"] = sweep.Failures
+		infoChanged = true
+	}
+	if infoChanged {
+		channel.SetOtherInfo(newInfo)
+		updates["other_info"] = channel.OtherInfo
+	}
+
+	if len(updates) == 0 {
+		return
+	}
+	if err := model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Updates(updates).Error; err != nil {
+		common.SysError(common.LogText("model health check: failed to persist channel %d: %v", channel.Id, err))
+		return
+	}
+	if storedModels, ok := updates["models"].(string); ok {
+		channel.Models = storedModels
+	}
+	if _, modelsChanged := updates["models"]; modelsChanged {
+		if err := channel.UpdateAbilities(nil); err != nil {
+			common.SysError(common.LogText("model health check: failed to update abilities for channel %d: %v", channel.Id, err))
+		}
+		model.InitChannelCache()
+	}
+}
+
+// refreshChannelModels sweeps the channel's models with real upstream probes and
+// persists the result, so routing only offers models that answered. It returns
+// how many models stay usable and how many are parked.
+func refreshChannelModels(ctx context.Context, channel *model.Channel, testUserID int, limit int) (usable, parked int) {
+	probe := func(ctx context.Context, model string) *types.NewAPIError {
+		return testChannel(ctx, channel, testUserID, model, "", false).newAPIError
+	}
+	sweep := sweepChannelModels(ctx, channel, probe, limit)
+	if !sweep.Complete {
+		// Never persist a partial sweep during shutdown.
+		return len(channel.GetModels()), len(readChannelDisabledModels(channel))
+	}
+	persistModelSweep(channel, sweep)
+	if len(sweep.Disabled) > 0 || len(sweep.Failures) > 0 {
+		common.SysLog(common.LogText("model health check: channel %d kept %d models, failing %d, disabled %d", channel.Id, len(sweep.Alive), len(sweep.Failures), len(sweep.Disabled)))
+	}
+	return len(sweep.Alive), len(sweep.Disabled)
 }
 
 // runChannelTestWorkers executes independent channel tests with bounded
@@ -1054,6 +1392,7 @@ func runChannelTestWorkers(
 		summary.Failed += result.Failed
 		summary.Disabled += result.Disabled
 		summary.Enabled += result.Enabled
+		summary.ModelsDisabled += result.ModelsDisabled
 		processed++
 		if report != nil && ctx.Err() == nil {
 			report(processed, total)
@@ -1069,16 +1408,12 @@ func performChannelTests(ctx context.Context, channels []*model.Channel, testUse
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	disableThreshold := int64(common.ChannelDisableThreshold * 1000)
-	if disableThreshold == 0 {
-		disableThreshold = 10000000 // an impossible value
-	}
 	return runChannelTestWorkers(
 		ctx,
 		channels,
 		concurrency,
 		func(ctx context.Context, channel *model.Channel) channelTestSummary {
-			return testChannelForHealthCheck(ctx, channel, testUserID, allowDisable, disableThreshold)
+			return testChannelForHealthCheck(ctx, channel, testUserID, allowDisable)
 		},
 		report,
 	)

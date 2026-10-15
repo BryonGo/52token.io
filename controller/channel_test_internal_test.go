@@ -3,6 +3,7 @@ package controller
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	relaytypes "github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/types"
@@ -492,4 +494,211 @@ func TestTestAllChannelsRejectsExistingActiveTask(t *testing.T) {
 	require.Equal(t, http.StatusConflict, recorder.Code)
 	require.Contains(t, recorder.Body.String(), existing.TaskID)
 	require.Contains(t, recorder.Body.String(), "A channel test task is already running or queued")
+}
+
+func TestClearChannelInfoHidesTheSuperAdminKey(t *testing.T) {
+	channel := &model.Channel{Id: 1, Name: "legacy-new-api"}
+	channel.SetSetting(dto.ChannelSettings{
+		Proxy:          "http://proxy.example",
+		SuperKey:       "super-admin-token",
+		SuperKeyUserID: 11566,
+	})
+	require.Contains(t, *channel.Setting, "super-admin-token")
+
+	clearChannelInfo(channel)
+
+	setting := channel.GetSetting()
+	assert.Empty(t, setting.SuperKey, "the super admin key never leaves the management API")
+	assert.Equal(t, 11566, setting.SuperKeyUserID)
+	assert.Equal(t, "http://proxy.example", setting.Proxy, "other settings stay untouched")
+	assert.NotContains(t, *channel.Setting, "super-admin-token")
+}
+
+func TestSweepChannelModelsKeepsAFailingModelUntilItExceedsTheFailureLimit(t *testing.T) {
+	probeFailingBeta := func(_ context.Context, target string) *relaytypes.NewAPIError {
+		if target == "beta" {
+			return relaytypes.NewOpenAIError(errors.New("no available channel for model"), relaytypes.ErrorCodeBadResponseStatusCode, http.StatusNotFound)
+		}
+		return nil
+	}
+	newChannel := func(priorFailures map[string]any) *model.Channel {
+		channel := &model.Channel{Id: 1, Name: "sweep"}
+		channel.Models = "alpha,beta"
+		if priorFailures != nil {
+			channel.SetOtherInfo(map[string]any{"model_failures": priorFailures})
+		}
+		return channel
+	}
+
+	first := sweepChannelModels(context.Background(), newChannel(nil), probeFailingBeta, maxModelProbesPerSweep)
+	assert.Equal(t, []string{"alpha", "beta"}, first.Alive, "one failure alone must not remove a model from routing")
+	assert.Empty(t, first.Disabled)
+	assert.Equal(t, map[string]int{"beta": 1}, first.Failures)
+
+	belowLimit := sweepChannelModels(context.Background(), newChannel(map[string]any{"beta": float64(maxModelFailuresBeforeParking - 1)}), probeFailingBeta, maxModelProbesPerSweep)
+	assert.Equal(t, []string{"alpha", "beta"}, belowLimit.Alive)
+	assert.Equal(t, map[string]int{"beta": maxModelFailuresBeforeParking}, belowLimit.Failures)
+
+	exceeded := sweepChannelModels(context.Background(), newChannel(map[string]any{"beta": float64(maxModelFailuresBeforeParking)}), probeFailingBeta, maxModelProbesPerSweep)
+	assert.Equal(t, []string{"alpha"}, exceeded.Alive)
+	assert.Equal(t, []string{"beta"}, exceeded.Disabled, "the model is parked once it failed more than the allowed number of times")
+	assert.Empty(t, exceeded.Failures, "a parked model no longer carries a failure count")
+}
+
+func TestSweepChannelModelsClearsTheFailureCountAfterSuccess(t *testing.T) {
+	channel := &model.Channel{Id: 2, Name: "recovered-sweep"}
+	channel.Models = "alpha,beta"
+	channel.SetOtherInfo(map[string]any{"model_failures": map[string]any{"beta": float64(2)}})
+
+	sweep := sweepChannelModels(context.Background(), channel, func(_ context.Context, _ string) *relaytypes.NewAPIError { return nil }, maxModelProbesPerSweep)
+
+	assert.Equal(t, []string{"alpha", "beta"}, sweep.Alive)
+	assert.Empty(t, sweep.Failures, "a model that answers again starts over")
+}
+
+func TestSweepChannelModelsRestoresARecoveredModel(t *testing.T) {
+	channel := &model.Channel{Id: 3, Name: "parked-sweep"}
+	channel.Models = "alpha"
+	channel.SetOtherInfo(map[string]any{"disabled_models": []any{"delta", "epsilon"}})
+
+	sweep := sweepChannelModels(context.Background(), channel, func(_ context.Context, target string) *relaytypes.NewAPIError {
+		if target == "epsilon" {
+			return relaytypes.NewOpenAIError(errors.New("still down"), relaytypes.ErrorCodeBadResponseStatusCode, http.StatusBadGateway)
+		}
+		return nil
+	}, maxModelProbesPerSweep)
+
+	assert.Equal(t, []string{"alpha", "delta"}, sweep.Alive)
+	assert.Equal(t, []string{"epsilon"}, sweep.Disabled)
+}
+
+func TestSweepChannelModelsStopsAtItsProbeBudget(t *testing.T) {
+	channel := &model.Channel{Id: 4, Name: "large-sweep"}
+	channel.Models = "m1,m2,m3,m4,m5,m6"
+	channel.SetOtherInfo(map[string]any{"disabled_models": []any{"parked1", "parked2"}})
+
+	probed := map[string]int{}
+	probe := func(_ context.Context, target string) *relaytypes.NewAPIError {
+		probed[target]++
+		return nil
+	}
+
+	sweep := sweepChannelModels(context.Background(), channel, probe, 3)
+
+	require.True(t, sweep.Complete)
+	assert.Len(t, probed, 3, "one sweep never spends more probes than its budget")
+	assert.ElementsMatch(t,
+		[]string{"m1", "m2", "m3", "m4", "m5", "m6", "parked1", "parked2"},
+		append(append([]string{}, sweep.Alive...), sweep.Disabled...),
+		"every model keeps a routing state")
+	for _, parked := range []string{"parked1", "parked2"} {
+		if probed[parked] == 0 {
+			assert.Contains(t, sweep.Disabled, parked, "a model the sweep did not reach stays parked")
+		}
+	}
+}
+
+func TestSweepChannelModelsNeverProbesGenerationModels(t *testing.T) {
+	channel := &model.Channel{Id: 5, Name: "generation-sweep"}
+	channel.Models = "gpt-image-1,chat-model"
+	channel.SetOtherInfo(map[string]any{"disabled_models": []any{"seedream-4-0"}})
+
+	var probed []string
+	probe := func(_ context.Context, target string) *relaytypes.NewAPIError {
+		probed = append(probed, target)
+		return nil
+	}
+
+	sweep := sweepChannelModels(context.Background(), channel, probe, maxModelProbesPerSweep)
+
+	require.True(t, sweep.Complete)
+	assert.Equal(t, []string{"chat-model"}, probed, "probing a generation model would produce a charged output")
+	assert.Equal(t, []string{"gpt-image-1", "chat-model"}, sweep.Alive)
+	assert.Equal(t, []string{"seedream-4-0"}, sweep.Disabled)
+}
+
+func TestSweepChannelModelsSpendsNothingAfterCancellation(t *testing.T) {
+	channel := &model.Channel{Id: 6, Name: "cancelled-sweep"}
+	channel.Models = "alpha,beta"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	probed := 0
+	probe := func(_ context.Context, _ string) *relaytypes.NewAPIError {
+		probed++
+		return nil
+	}
+
+	sweep := sweepChannelModels(ctx, channel, probe, maxModelProbesPerSweep)
+
+	assert.False(t, sweep.Complete, "a cancelled sweep must not be persisted")
+	assert.Nil(t, sweep.Alive)
+	assert.Nil(t, sweep.Disabled)
+	assert.Zero(t, probed)
+}
+
+func TestSweepChannelModelsKeepsWhatItLearnedWhenTheBudgetRunsOut(t *testing.T) {
+	channel := &model.Channel{Id: 7, Name: "budget-sweep"}
+	channel.Models = "alpha,beta"
+	channel.SetOtherInfo(map[string]any{"disabled_models": []any{"parked"}})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 0)
+	defer cancel()
+
+	probed := 0
+	probe := func(_ context.Context, _ string) *relaytypes.NewAPIError {
+		probed++
+		return nil
+	}
+
+	sweep := sweepChannelModels(ctx, channel, probe, maxModelProbesPerSweep)
+
+	assert.True(t, sweep.Complete, "a spent budget still stores what the sweep learned")
+	assert.Zero(t, probed, "no probe runs once the budget is spent")
+	assert.Equal(t, []string{"alpha", "beta"}, sweep.Alive)
+	assert.Equal(t, []string{"parked"}, sweep.Disabled)
+}
+
+func TestChannelHealthCheckTargetNeverPicksAGenerationModel(t *testing.T) {
+	chat := &model.Channel{Name: "chat-first"}
+	chat.Models = "gpt-image-1,chat-model"
+	target, allowed := channelHealthCheckTarget(chat)
+	assert.Equal(t, "chat-model", target)
+	assert.True(t, allowed)
+
+	generationOnly := &model.Channel{Name: "images-only"}
+	generationOnly.Models = "seedream-4-0,sora-2"
+	target, allowed = channelHealthCheckTarget(generationOnly)
+	assert.Empty(t, target)
+	assert.False(t, allowed, "a channel that only serves generation models is not probed")
+
+	pinnedGeneration := &model.Channel{Name: "pinned"}
+	pinnedGeneration.Models = "chat-model"
+	pinnedGeneration.TestModel = common.GetPointer("sora-2")
+	_, allowed = channelHealthCheckTarget(pinnedGeneration)
+	assert.False(t, allowed, "even a pinned test model is not probed when it bills for generation")
+
+	pinnedChat := &model.Channel{Name: "pinned-chat"}
+	pinnedChat.Models = "chat-model"
+	pinnedChat.TestModel = common.GetPointer("gpt-5-medium")
+	target, allowed = channelHealthCheckTarget(pinnedChat)
+	assert.Equal(t, "gpt-5-medium", target)
+	assert.True(t, allowed)
+}
+
+func TestBillableGenerationModelCoversImageVideoAndAudioFamilies(t *testing.T) {
+	for _, model := range []string{
+		"gemini-3-pro-image", "gpt-image-1", "nano-banana", "doubao-seedream-4-0",
+		"flux-1.1-pro", "imagen-3.0", "seedance-2-5", "sora-2", "veo-3.1", "kling-v2",
+		"wan2.7-image", "hailuo-02", "text-embedding-3-large-tts", "whisper-1", "suno-v4",
+	} {
+		assert.True(t, billableGenerationModel(model), model)
+	}
+	for _, model := range []string{
+		"claude-sonnet-5", "gpt-5-medium", "deepseek-ai/DeepSeek-V3", "qwen38-abl",
+		"gemini-1.5-flash", "grok-4.1-thinking",
+	} {
+		assert.False(t, billableGenerationModel(model), model)
+	}
 }

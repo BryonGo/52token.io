@@ -63,7 +63,12 @@ const (
 	ChannelTypeSGLang         = 63
 	ChannelTypeOpenCodeZen    = 64
 	ChannelTypeOpenCodeGo     = 65
-	ChannelTypeDummy          // this one is only for count, do not add any channel after this
+	// ChannelTypeNewAPILegacy talks to a new-api gateway that runs a release
+	// older than the one this fork targets. Such a station never reports its
+	// owner's quota to an API key, so the balance is read with an account-level
+	// access token instead. Relay behavior matches the New API type.
+	ChannelTypeNewAPILegacy = 66
+	ChannelTypeDummy        // this one is only for count, do not add any channel after this
 
 )
 
@@ -136,6 +141,7 @@ var ChannelBaseURLs = []string{
 	"",                                          //63
 	"https://opencode.ai/zen",                   //64
 	"https://opencode.ai/zen/go",                //65
+	"",                                          //66
 }
 
 func GetChannelBaseURL(channelType int) string {
@@ -208,6 +214,7 @@ var ChannelTypeNames = map[int]string{
 	ChannelTypeSGLang:         "SGLang",
 	ChannelTypeOpenCodeZen:    "OpenCode Zen",
 	ChannelTypeOpenCodeGo:     "OpenCode Go",
+	ChannelTypeNewAPILegacy:   "New API (Legacy)",
 }
 
 func GetChannelTypeName(channelType int) string {

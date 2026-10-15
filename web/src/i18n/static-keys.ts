@@ -82,6 +82,8 @@ export const STATIC_I18N_KEYS = [
   "New API's flexible channel lets you configure upstream addresses and authentication per endpoint, choose native forwarding or supported protocol conversions, and configure model listing and balance queries independently",
   'Flexible integration',
   'Connect to model services through a Sub2API gateway',
+  'New API (Legacy)',
+  'Connect to a New API gateway running an older release, and read the upstream account balance with a super admin key',
   'Connect to New API model services with support for multiple task plugins',
   'SGLang',
   'Connect to self-hosted models served by SGLang',
@@ -217,8 +219,12 @@ export const STATIC_I18N_KEYS = [
 
   // Pricing constants
   'Name',
-  'Price: Low to High',
-  'Price: High to Low',
+  'Input Price: Low to High',
+  'Input Price: High to Low',
+  'Output Price: Low to High',
+  'Output Price: High to Low',
+  'Per-request Price: Low to High',
+  'Per-request Price: High to Low',
   'All Models',
   'Token-based',
   'Per Request',

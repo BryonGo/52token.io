@@ -35,6 +35,14 @@ type ChannelSettings struct {
 	// TLSInsecureSkipVerify accepts upstream certificates that fail
 	// verification, such as self-signed ones, for this channel only.
 	TLSInsecureSkipVerify bool `json:"tls_insecure_skip_verify,omitempty"`
+	// SuperKey is an account-level access token (超级管理 key) of the upstream
+	// gateway. Only the legacy New API channel type reads it, and only to query
+	// the upstream account balance; relay requests keep using Channel.Key.
+	SuperKey string `json:"super_key,omitempty"`
+	// SuperKeyUserID is the upstream user id that owns SuperKey. Stations whose
+	// dashboard API requires the New-Api-User header need it; happyapi-like
+	// stations accept the token alone, so it stays optional.
+	SuperKeyUserID int `json:"super_key_user_id,omitempty"`
 }
 
 // BindsTaskPlugin reports whether the channel is bound to the task plugin,

@@ -9,6 +9,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -162,4 +163,109 @@ func TestUpdateChannelNewAPIBalanceUsesTheSmallerRemainingQuota(t *testing.T) {
 			assert.InDelta(t, tc.want, channel.Balance, 1e-9)
 		})
 	}
+}
+
+func TestUpdateChannelNewAPILegacyBalanceUsesTheSuperAdminKey(t *testing.T) {
+	setupSub2APIBalanceTest(t)
+
+	sawUserSelf := false
+	sawKeyUsage := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/user/self":
+			sawUserSelf = true
+			assert.Equal(t, "Bearer super-admin-token", r.Header.Get("Authorization"))
+			assert.Equal(t, "11566", r.Header.Get("New-Api-User"))
+			_, _ = w.Write([]byte(`{"success":true,"message":"","data":{"quota":1735350589,"used_quota":1764899411}}`))
+		case "/api/usage/token/":
+			sawKeyUsage = true
+			_, _ = w.Write([]byte(`{"code":true,"data":{"total_available":500000,"unlimited_quota":false}}`))
+		case "/api/status":
+			_, _ = w.Write([]byte(`{"success":true,"data":{"quota_per_unit":500000}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	baseURL := server.URL
+	channel := &model.Channel{
+		Type:    constant.ChannelTypeNewAPILegacy,
+		BaseURL: &baseURL,
+		Key:     "sk-relay-key",
+		Name:    "legacy-new-api",
+	}
+	channel.SetSetting(dto.ChannelSettings{SuperKey: "super-admin-token", SuperKeyUserID: 11566})
+	require.NoError(t, model.DB.Create(channel).Error)
+
+	result, err := updateChannelBalance(channel)
+
+	require.NoError(t, err)
+	assert.True(t, sawUserSelf, "the account endpoint answers when a super admin key is configured")
+	assert.False(t, sawKeyUsage, "the relay key is not used for the balance when a super admin key is configured")
+	assert.InDelta(t, 3470.701178, result.Balance, 1e-6)
+	assert.InDelta(t, result.Balance, channel.Balance, 1e-9)
+}
+
+func TestUpdateChannelNewAPILegacyBalanceFallsBackToTheKeyQuery(t *testing.T) {
+	setupSub2APIBalanceTest(t)
+
+	sawUserSelf := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/user/self":
+			sawUserSelf = true
+			http.NotFound(w, r)
+		case "/api/usage/token/":
+			assert.Equal(t, "Bearer sk-relay-key", r.Header.Get("Authorization"))
+			_, _ = w.Write([]byte(`{"code":true,"data":{"total_available":500000,"unlimited_quota":false}}`))
+		case "/api/status":
+			_, _ = w.Write([]byte(`{"success":true,"data":{"quota_per_unit":500000}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	baseURL := server.URL
+	channel := &model.Channel{
+		Type:    constant.ChannelTypeNewAPILegacy,
+		BaseURL: &baseURL,
+		Key:     "sk-relay-key",
+		Name:    "legacy-new-api-without-super-key",
+	}
+	require.NoError(t, model.DB.Create(channel).Error)
+
+	result, err := updateChannelBalance(channel)
+
+	require.NoError(t, err)
+	assert.False(t, sawUserSelf, "without a super admin key the account endpoint is not called")
+	assert.InDelta(t, 1, result.Balance, 1e-9)
+}
+
+func TestUpdateChannelNewAPILegacyBalanceReportsUpstreamRejection(t *testing.T) {
+	setupSub2APIBalanceTest(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/user/self" {
+			_, _ = w.Write([]byte(`{"success":false,"message":"invalid access token","data":{}}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	baseURL := server.URL
+	channel := &model.Channel{
+		Type:    constant.ChannelTypeNewAPILegacy,
+		BaseURL: &baseURL,
+		Key:     "sk-relay-key",
+		Name:    "legacy-new-api-rejected",
+	}
+	channel.SetSetting(dto.ChannelSettings{SuperKey: "stale-super-key"})
+	require.NoError(t, model.DB.Create(channel).Error)
+
+	_, err := updateChannelBalance(channel)
+
+	require.ErrorContains(t, err, "invalid access token")
 }

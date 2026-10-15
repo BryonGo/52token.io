@@ -508,7 +508,19 @@ func updateChannelNewAPIBalance(channel *model.Channel) (float64, error) {
 		return 0, common.NewMessage(`The upstream key has unlimited quota. Turn on "Allow querying user quota" for this key on the upstream to see the real balance.`)
 	}
 
-	body, err = GetResponseBody("GET", baseURL+"/api/status", channel, nil)
+	quotaPerUnit, err := fetchNewAPIQuotaPerUnit(channel, baseURL)
+	if err != nil {
+		return 0, err
+	}
+	balance := remaining / quotaPerUnit
+	channel.UpdateBalance(balance)
+	return balance, nil
+}
+
+// fetchNewAPIQuotaPerUnit reads the upstream's quota-per-unit so a raw quota
+// value can be reported as USD. This endpoint is public on a new-api gateway.
+func fetchNewAPIQuotaPerUnit(channel *model.Channel, baseURL string) (float64, error) {
+	body, err := GetResponseBody("GET", baseURL+"/api/status", channel, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -523,7 +535,51 @@ func updateChannelNewAPIBalance(channel *model.Channel) (float64, error) {
 	if status.Data.QuotaPerUnit <= 0 {
 		return 0, errors.New("New API /api/status response is missing quota_per_unit")
 	}
-	balance := remaining / status.Data.QuotaPerUnit
+	return status.Data.QuotaPerUnit, nil
+}
+
+// updateChannelNewAPILegacyBalance reports the account balance of a new-api
+// gateway running an older release. Such a station never returns its owner's
+// quota from /api/usage/token/ and commonly runs unlimited tokens, so the key
+// query cannot produce a number; the account-level access token (超级管理 key)
+// stored in the channel settings is used instead. When no access token is
+// configured, the key-based query is attempted as a fallback.
+func updateChannelNewAPILegacyBalance(channel *model.Channel) (float64, error) {
+	setting := channel.GetSetting()
+	superKey := strings.TrimSpace(setting.SuperKey)
+	if superKey == "" {
+		return updateChannelNewAPIBalance(channel)
+	}
+	baseURL := strings.TrimRight(channel.GetBaseURL(), "/")
+	if baseURL == "" {
+		return 0, errors.New("New API (Legacy) channel is missing base_url")
+	}
+	headers := GetAuthHeader(superKey)
+	if setting.SuperKeyUserID > 0 {
+		headers.Set("New-Api-User", strconv.Itoa(setting.SuperKeyUserID))
+	}
+	body, err := GetResponseBody("GET", baseURL+"/api/user/self", channel, headers)
+	if err != nil {
+		return 0, err
+	}
+	var self struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+		Data    struct {
+			Quota float64 `json:"quota"`
+		} `json:"data"`
+	}
+	if err := common.Unmarshal(body, &self); err != nil {
+		return 0, err
+	}
+	if !self.Success {
+		return 0, fmt.Errorf("New API (Legacy) account query failed: %s", self.Message)
+	}
+	quotaPerUnit, err := fetchNewAPIQuotaPerUnit(channel, baseURL)
+	if err != nil {
+		return 0, err
+	}
+	balance := self.Data.Quota / quotaPerUnit
 	channel.UpdateBalance(balance)
 	return balance, nil
 }
@@ -656,6 +712,8 @@ func updateStandardChannelBalance(channel *model.Channel) (float64, error) {
 		return updateChannelSub2APIBalance(channel)
 	case constant.ChannelTypeNewAPI:
 		return updateChannelNewAPIBalance(channel)
+	case constant.ChannelTypeNewAPILegacy:
+		return updateChannelNewAPILegacyBalance(channel)
 	default:
 		return 0, common.NewMessage("Not implemented yet")
 	}

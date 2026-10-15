@@ -41,6 +41,16 @@ func GetEndpointTypesByChannelType(channelType int, modelName string) []constant
 			constant.EndpointTypeGemini,
 			constant.EndpointTypeOpenAIAlphaSearch,
 		}
+	case constant.ChannelTypeNewAPILegacy:
+		// Older stations predate /v1/alpha/search, so the endpoint is not offered
+		// here even though the New API type supports it.
+		endpointTypes = []constant.EndpointType{
+			constant.EndpointTypeOpenAI,
+			constant.EndpointTypeOpenAIResponse,
+			constant.EndpointTypeOpenAIResponseCompact,
+			constant.EndpointTypeAnthropic,
+			constant.EndpointTypeGemini,
+		}
 	case constant.ChannelTypeOpenCodeZen, constant.ChannelTypeOpenCodeGo:
 		endpointTypes = OpenCodeSupportedEndpointTypes(channelType, modelName)
 	case constant.ChannelTypeCodex:

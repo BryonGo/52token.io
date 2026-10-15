@@ -21,6 +21,7 @@ import { z } from 'zod'
 import {
   CLAUDE_FIELD_PASSTHROUGH_TYPES,
   CHANNEL_TYPE_NEW_API,
+  CHANNEL_TYPE_NEW_API_LEGACY,
   CHANNEL_TYPE_OLLAMA,
   CHANNEL_TYPE_TASK_PLUGIN,
   CHANNEL_TYPE_VLLM,
@@ -274,6 +275,8 @@ export const channelFormSchema = z
     responses_websocket_enabled: z.boolean().optional(),
     system_prompt: z.string().optional(),
     system_prompt_override: z.boolean().optional(),
+    super_key: z.string().optional(),
+    super_key_user_id: z.number().int().nonnegative().optional(),
     // Type-specific settings (stored in settings JSON)
     is_enterprise_account: z.boolean().optional(), // OpenRouter specific
     vertex_key_type: z.enum(['json', 'api_key']).optional(), // Vertex AI specific
@@ -303,6 +306,7 @@ export const channelFormSchema = z
         36,
         45,
         CHANNEL_TYPE_NEW_API,
+        CHANNEL_TYPE_NEW_API_LEGACY,
         CHANNEL_TYPE_TASK_PLUGIN,
         CHANNEL_TYPE_VLLM,
         CHANNEL_TYPE_SGLANG,
@@ -467,6 +471,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   responses_websocket_enabled: false,
   system_prompt: '',
   system_prompt_override: false,
+  super_key: '',
   // Type-specific settings
   is_enterprise_account: false,
   vertex_key_type: 'json',
@@ -500,7 +505,7 @@ export function transformChannelToFormDefaults(
   channel: Channel
 ): ChannelFormValues {
   // Parse channel extra settings from setting field
-  let extraSettings = {
+  let extraSettings: Partial<ChannelFormValues> = {
     task_plugin_key: '',
     task_extend_plugin_keys: [] as string[],
     force_format: false,
@@ -513,6 +518,7 @@ export function transformChannelToFormDefaults(
     responses_websocket_enabled: false,
     system_prompt: '',
     system_prompt_override: false,
+    super_key: '',
   }
 
   if (channel.setting) {
@@ -536,6 +542,11 @@ export function transformChannelToFormDefaults(
           parsed.responses_websocket_enabled === true,
         system_prompt: parsed.system_prompt || '',
         system_prompt_override: parsed.system_prompt_override || false,
+        super_key: parsed.super_key || '',
+        super_key_user_id:
+          typeof parsed.super_key_user_id === 'number'
+            ? parsed.super_key_user_id
+            : undefined,
       }
     } catch (error) {
       // eslint-disable-next-line no-console
@@ -673,6 +684,16 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
       formData.responses_websocket_enabled === true,
     system_prompt: formData.system_prompt || '',
     system_prompt_override: formData.system_prompt_override || false,
+  }
+
+  // The super admin key is write-only: management APIs never return it, so an
+  // empty field means "keep the stored key" and must not overwrite it.
+  const superKey = formData.super_key?.trim() || ''
+  if (superKey) {
+    settingObj.super_key = superKey
+  }
+  if (formData.super_key_user_id) {
+    settingObj.super_key_user_id = formData.super_key_user_id
   }
 
   const protocol = normalizeHttpProtocol(formData.http_protocol)

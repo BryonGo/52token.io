@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+#
+# Refuses a commit whose added lines carry key material. Enable it in a clone
+# with:  git config core.hooksPath .githooks
+set -uo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+exec "$repo_root/bin/check-secrets.sh" --staged

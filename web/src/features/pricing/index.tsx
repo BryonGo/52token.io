@@ -91,7 +91,7 @@ export function Pricing() {
     () =>
       selectedModelName
         ? (models || []).find(
-            (model) => model.model_name === selectedModelName
+            (model) => (model.key ?? model.model_name) === selectedModelName
           ) || null
         : null,
     [models, selectedModelName]

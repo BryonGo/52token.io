@@ -800,3 +800,183 @@ describe('model cards', () => {
     vi.useRealTimers()
   })
 })
+
+it('shows channel CNY cost without global FX, recharge or local group markup', () => {
+  useSystemConfigStore.getState().setConfig({
+    currency: {
+      ...DEFAULT_CURRENCY_CONFIG,
+      quotaDisplayType: 'CNY',
+      usdExchangeRate: 7,
+    },
+  })
+  const model = pricingModel({
+    model_name: 'deepseek-ai/DeepSeek-V3',
+    key: '127:deepseek-ai/DeepSeek-V3',
+    model_ratio: 0.5,
+    completion_ratio: 4,
+    channel_id: 127,
+    channel_name: 'HappyAPI',
+    channel_enabled: true,
+    channel_cost: {
+      cny: {
+        input: 0.2,
+        output: 0.8,
+        cache_read: 0.2,
+        cache_write: 0.2,
+        cache_write_1h: 0.32,
+      },
+    },
+  })
+  const onClick = vi.fn()
+  render(
+    <ModelCard
+      model={model}
+      tokenUnit='M'
+      selectedGroup='premium'
+      priceRate={7}
+      usdExchangeRate={7}
+      showRechargePrice
+      onClick={onClick}
+    />
+  )
+  expect(screen.getByText('Input').parentElement).toHaveTextContent(
+    /¥0.2\s*\/\s*1M/
+  )
+  expect(screen.getByText('Output').parentElement).toHaveTextContent(
+    /¥0.8\s*\/\s*1M/
+  )
+  expect(screen.getByText(/Channel: HappyAPI/)).toBeVisible()
+})
+
+it('shows both upstream context tiers in CNY without display FX markup', () => {
+  useSystemConfigStore.getState().setConfig({
+    currency: {
+      ...DEFAULT_CURRENCY_CONFIG,
+      quotaDisplayType: 'CNY',
+      usdExchangeRate: 7,
+    },
+  })
+  const rates = {
+    input: 0.4,
+    output: 2.4,
+    cache_read: 0.04,
+    cache_write: 0.4999998,
+    cache_write_1h: 0.4999998,
+  }
+  const model = pricingModel({
+    model_name: 'gpt-5.6-terra-xhigh',
+    channel_id: 126,
+    channel_name: 'HappyAPI',
+    billing_mode: 'tiered_expr',
+    billing_expr:
+      'len <= 272000 ? tier("Short", p * .4 + c * 2.4 + cr * .04) : tier("Long", p * .8 + c * 3.6 + cr * .08)',
+    channel_cost: {
+      expression:
+        'len <= 272000 ? tier("Short", p * .4 + c * 2.4 + cr * .04) : tier("Long", p * .8 + c * 3.6 + cr * .08)',
+      cny: rates,
+      tiers: [
+        { label: 'Short', max_context: 272000, rates },
+        {
+          label: 'Long',
+          rates: { ...rates, input: 0.8, output: 3.6, cache_read: 0.08 },
+        },
+      ],
+    },
+  })
+  render(
+    <ModelCard
+      model={model}
+      tokenUnit='M'
+      priceRate={7}
+      usdExchangeRate={7}
+      onClick={vi.fn()}
+    />
+  )
+  expect(screen.getByText('Input').parentElement).toHaveTextContent(
+    /¥0.4.*¥0.8/
+  )
+  expect(screen.getByText('Output').parentElement).toHaveTextContent(
+    /¥2.4.*¥3.6/
+  )
+})
+
+it('shows a converted request expression once without token prices or FX markup', () => {
+  useSystemConfigStore.getState().setConfig({
+    currency: {
+      ...DEFAULT_CURRENCY_CONFIG,
+      quotaDisplayType: 'CNY',
+      usdExchangeRate: 7,
+    },
+  })
+  const model = pricingModel({
+    model_name: 'grok-4-fast-ci',
+    channel_id: 126,
+    channel_name: 'HappyAPI',
+    quota_type: 1,
+    model_price: 0.025,
+    billing_mode: 'tiered_expr',
+    billing_expr: 'tier("request", fixed(0.005))',
+    channel_cost: {
+      cny_request_price: 0.005,
+      expression: 'tier("request", fixed(0.005))',
+    },
+  })
+  render(
+    <ModelCard
+      model={model}
+      tokenUnit='M'
+      priceRate={7}
+      usdExchangeRate={7}
+      showRechargePrice
+      onClick={vi.fn()}
+    />
+  )
+  expect(screen.getByText(/¥0.005/)).toBeVisible()
+  expect(screen.queryByText('Input')).not.toBeInTheDocument()
+  expect(screen.queryByText('Output')).not.toBeInTheDocument()
+  expect(screen.queryByText(/¥0.035/)).not.toBeInTheDocument()
+})
+
+it('applies the POJIA local 0.08 group once to the channel base CNY price', () => {
+  useSystemConfigStore.getState().setConfig({
+    currency: {
+      ...DEFAULT_CURRENCY_CONFIG,
+      quotaDisplayType: 'CNY',
+      usdExchangeRate: 7,
+    },
+  })
+  const model = pricingModel({
+    model_name: 'deepseek-v4-pro',
+    channel_id: 134,
+    channel_name: 'POJIA',
+    enable_groups: ['POJIA'],
+    group_ratio: { POJIA: 0.08 },
+    channel_cost: {
+      local_group_billing: true,
+      cny: {
+        input: 4.5,
+        output: 13.5,
+        cache_read: 0.15,
+        cache_write: 4.5,
+        cache_write_1h: 4.5,
+      },
+    },
+  })
+  render(
+    <ModelCard
+      model={model}
+      tokenUnit='M'
+      selectedGroup='POJIA'
+      priceRate={7}
+      usdExchangeRate={7}
+      showRechargePrice
+      onClick={vi.fn()}
+    />
+  )
+  expect(screen.getByText('Input').parentElement).toHaveTextContent(
+    /¥0.36\s*\/\s*1M/
+  )
+  expect(screen.getByText('Output').parentElement).toHaveTextContent(
+    /¥1.08\s*\/\s*1M/
+  )
+})

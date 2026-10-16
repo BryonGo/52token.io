@@ -238,9 +238,7 @@ export function PricingSection({ defaultValues }: PricingSectionProps) {
                     <FormLabel>
                       {displayType === 'CNY'
                         ? t('CNY per USD')
-                        : displayType === 'USD'
-                          ? t('USD Exchange Rate')
-                          : t('USD Exchange Rate')}
+                        : t('USD Exchange Rate')}
                     </FormLabel>
                     <FormControl>
                       <Input
@@ -251,7 +249,7 @@ export function PricingSection({ defaultValues }: PricingSectionProps) {
                     </FormControl>
                     <FormDescription>
                       {t(
-                        'Real exchange rate between USD and your payment gateway currency'
+                        'This rate converts wallet units for display. Channel CNY costs are converted separately using the channel recharge ratio; changing this rate does not change upstream purchase costs.'
                       )}
                     </FormDescription>
                     <FormMessage />

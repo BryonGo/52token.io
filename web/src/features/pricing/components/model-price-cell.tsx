@@ -50,8 +50,9 @@ export function ModelPriceCell(props: {
 }) {
   const { t, i18n } = useTranslation()
   const currency = useSystemConfigStore((state) => state.config.currency)
-  const currencyLabel =
+  let currencyLabel =
     currency.quotaDisplayType === 'TOKENS' ? 'USD' : getCurrencyLabel()
+  if (props.model.channel_cost) currencyLabel = 'CNY'
   const options = props.options ?? {}
   const tokenUnit = options.tokenUnit ?? DEFAULT_TOKEN_UNIT
   const tokenUnitLabel = tokenUnit === 'K' ? '1K' : '1M'
@@ -83,6 +84,13 @@ export function ModelPriceCell(props: {
       currency,
     ]
   )
+  if (props.model.channel_cost?.error) {
+    return (
+      <span className='text-destructive text-xs'>
+        {t(props.model.channel_cost.error)}
+      </span>
+    )
+  }
   let metrics: Array<{ label: string; value: string }>
   const providerCaption = dynamic?.providerCount
     ? t('{{count}} providers', { count: dynamic.providerCount })

@@ -17,13 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import {
-  cleanup,
-  render,
-  screen,
-  within,
-  waitFor,
-} from '@testing-library/react'
+import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -160,17 +154,34 @@ describe('pricing synchronization', () => {
     ).not.toBeInTheDocument()
     const user = userEvent.setup()
     const copy = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue()
-    await user.click(screen.getByRole('button', { name: 'Copy billing expression' }))
+    await user.click(
+      screen.getByRole('button', { name: 'Copy billing expression' })
+    )
     expect(copy).toHaveBeenCalledWith(expression)
   })
 
   it('shows every parsed tier and falls back to the full expression when pricing cannot be parsed safely', () => {
-    const tiered = 'len <= 128000 ? tier("base", p * 2 + c * 8 + cr * 0.2) : tier("long", p * 4 + c * 12 + cr * 0.4)'
+    const tiered =
+      'len <= 128000 ? tier("base", p * 2 + c * 8 + cr * 0.2) : tier("long", p * 4 + c * 12 + cr * 0.4)'
     const custom = 'tier("custom", p * 2 + c * 8) * max(1, param("factor"))'
-    render(<TableFixture prices={{
-      tiered: { current: {}, upstreams: { upstream: { billing_mode: 'tiered_expr', billing_expr: tiered } } },
-      custom: { current: {}, upstreams: { upstream: { billing_mode: 'tiered_expr', billing_expr: custom } } },
-    }} />)
+    render(
+      <TableFixture
+        prices={{
+          tiered: {
+            current: {},
+            upstreams: {
+              upstream: { billing_mode: 'tiered_expr', billing_expr: tiered },
+            },
+          },
+          custom: {
+            current: {},
+            upstreams: {
+              upstream: { billing_mode: 'tiered_expr', billing_expr: custom },
+            },
+          },
+        }}
+      />
+    )
     expect(screen.queryByText(tiered)).not.toBeInTheDocument()
     expect(screen.getByText(/128,000/)).toBeVisible()
     expect(screen.getByText('$0.2')).toBeVisible()
@@ -293,240 +304,121 @@ describe('pricing synchronization', () => {
       CacheRatio: 0,
     })
   })
-
-  it('previews the expression, rejects a stale save and reloads before applying without residual ratio differences', async () => {
-    let version = 'v1'
-    const get = vi.spyOn(api, 'get').mockImplementation(async (url) => {
-      if (url === '/api/ratio_sync/channels') {
-        return {
-          data: {
-            success: true,
-            data: [
-              {
-                id: 7,
-                name: 'Upstream',
-                base_url: 'https://example.test',
-                type: 1,
-                status: 1,
-              },
-            ],
-          },
-        }
-      }
-      return {
-        data: {
-          success: true,
-          data: {
-            entries: [
-              {
-                model_name: 'm',
-                version,
-                configured: { ModelRatio: 1, CompletionRatio: 2 },
-                effective: { ModelRatio: 1, CompletionRatio: 2 },
-              },
-            ],
-            empty_version: 'empty',
-            options: pricingOptions({
-              ModelRatio: '{"m":1,"untouched":2}',
-              CompletionRatio: '{"m":2}',
-            }),
-          },
-        },
-      }
-    })
-    const post = vi.spyOn(api, 'post').mockResolvedValue({
-      data: {
-        success: true,
-        data: {
-          differences: {
-            m: {
-              billing_expr: {
-                current: null,
-                upstreams: { 'Upstream(7)': expression },
-                confidence: { 'Upstream(7)': true },
-              },
-            },
-          },
-          prices: {
-            m: {
-              current: {
-                model_ratio: 1,
-                completion_ratio: 2,
-                billing_mode: 'ratio',
-              },
-              upstreams: {
-                'Upstream(7)': {
-                  billing_mode: 'tiered_expr',
-                  billing_expr: expression,
-                },
-              },
-            },
-          },
-          test_results: [{ name: 'Upstream(7)', status: 'success' }],
-        },
-      },
-    })
-    const patch = vi
-      .spyOn(api, 'patch')
-      .mockResolvedValueOnce({
-        data: {
-          success: false,
-          message: 'Model pricing changed; reload before saving',
-        },
-      })
-      .mockResolvedValue({ data: { success: true } })
-    const client = new QueryClient({
-      defaultOptions: {
-        queries: { retry: false },
-        mutations: { retry: false },
-      },
-    })
-    render(
-      <QueryClientProvider client={client}>
-        <UpstreamRatioSync />
-      </QueryClientProvider>
-    )
-    const user = userEvent.setup()
-    await user.click(
-      screen.getByRole('button', { name: 'Select price sources' })
-    )
-    await user.click(
-      await screen.findByRole('checkbox', { name: 'Select Upstream' })
-    )
-    await user.click(screen.getByRole('button', { name: 'Confirm Selection' }))
-    await user.click(
-      await screen.findByRole('checkbox', {
-        name: 'Select price for m from Upstream(7)',
-      })
-    )
-    expect(screen.getByText('1 selected models')).toBeVisible()
-    await user.click(screen.getByRole('button', { name: 'Clear selection' }))
-    expect(screen.getByRole('button', { name: 'Apply Sync' })).toBeDisabled()
-    await user.click(
-      screen.getByRole('checkbox', {
-        name: 'Select price for m from Upstream(7)',
-      })
-    )
-    await user.click(screen.getByRole('button', { name: 'Apply Sync' }))
-    const preview = screen.getByRole('alertdialog', {
-      name: 'Preview price changes',
-    })
-    expect(within(preview).getByText(/Expression pricing/)).toHaveTextContent('Input: $2')
-    expect(within(preview).getByText(/Expression pricing/)).toHaveTextContent('Output: $8')
-    expect(within(preview).queryByText(expression)).not.toBeInTheDocument()
-    expect(patch).not.toHaveBeenCalled()
-    await user.click(
-      within(preview).getByRole('button', { name: 'Confirm Changes' })
-    )
-    expect(
-      await screen.findByText('Model pricing changed; reload before saving')
-    ).toBeVisible()
-    expect(
-      screen.getByRole('button', { name: 'Confirm Changes' })
-    ).toBeDisabled()
-    version = 'v2'
-    await user.click(screen.getByRole('button', { name: 'Reload pricing' }))
-    await user.click(screen.getByRole('button', { name: 'Confirm Selection' }))
-    await user.click(
-      await screen.findByRole('checkbox', {
-        name: 'Select price for m from Upstream(7)',
-      })
-    )
-    await user.click(screen.getByRole('button', { name: 'Apply Sync' }))
-    await user.click(screen.getByRole('button', { name: 'Confirm Changes' }))
-    await waitFor(() =>
-      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
-    )
-    expect(
-      await screen.findByText('No upstream price differences found')
-    ).toBeVisible()
-    expect(patch).toHaveBeenLastCalledWith('/api/option/model_pricing', {
-      changes: [
-        {
-          model_name: 'm',
-          expected_version: 'v2',
-          pricing: {
-            'billing_setting.billing_mode': 'tiered_expr',
-            'billing_setting.billing_expr': expression,
-          },
-        },
-      ],
-    })
-    expect(post).toHaveBeenCalledTimes(2)
-    expect(
-      get.mock.calls.filter(([url]) => url === '/api/option/model_pricing')
-        .length
-    ).toBeGreaterThanOrEqual(2)
-  })
 })
 
-it('shows a source failure instead of a no-differences result and retries the selected source', async () => {
-  vi.spyOn(api, 'get').mockImplementation(async (url) => {
-    if (url === '/api/ratio_sync/channels') {
-      return {
-        data: {
-          success: true,
-          data: [
-            {
-              id: 7,
-              name: 'Upstream',
-              base_url: 'https://example.test',
-              type: 1,
-              status: 1,
-            },
-          ],
-        },
-      }
-    }
-    return {
-      data: {
-        success: true,
-        data: {
-          entries: [],
-          empty_version: 'empty',
-          options: pricingOptions({}),
+function channelSource(id: number, name: string, input: number) {
+  return {
+    id,
+    name,
+    status: 1,
+    config: {
+      enabled: true,
+      source: 'happyapi',
+      credits_per_cny: 5,
+      upstream_group: 'default',
+    },
+    prices: [
+      {
+        model: 'DeepSeek-V3',
+        cost: {
+          model: 'DeepSeek-V3',
+          upstream: { input: input * 5, output: 4, cache_read: 0.25 },
+          cny: { input, output: 0.8, cache_read: 0.05 },
+          upstream_group_ratio: 1,
+          tier: 'standard',
+          synced_at: 1792112400,
+          source_url: 'https://happyapi.org/api/pricing',
         },
       },
-    }
+    ],
+  }
+}
+
+function renderChannelSync() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  })
+  return render(
+    <QueryClientProvider client={client}>
+      <UpstreamRatioSync />
+    </QueryClientProvider>
+  )
+}
+
+it('synchronizes only the selected channel, preserving other sources and global prices', async () => {
+  const sources = [
+    channelSource(7, 'Happy main', 0.2),
+    channelSource(8, 'Happy backup', 0.24),
+  ]
+  const get = vi
+    .spyOn(api, 'get')
+    .mockResolvedValue({ data: { success: true, data: sources } })
+  const post = vi
+    .spyOn(api, 'post')
+    .mockResolvedValue({ data: { success: true } })
+  const patch = vi.spyOn(api, 'patch')
+  renderChannelSync()
+  const user = userEvent.setup()
+  const selector = await screen.findByRole('combobox', { name: 'Price source' })
+  expect(screen.queryByRole('table')).not.toBeInTheDocument()
+  await user.click(selector)
+  await user.click(
+    await screen.findByRole('option', { name: 'Happy main #7 · HappyAPI' })
+  )
+  expect(screen.getAllByRole('table')).toHaveLength(1)
+  expect(screen.getByText('¥0.2')).toBeVisible()
+  expect(screen.queryByText('¥0.24')).not.toBeInTheDocument()
+  await user.click(
+    screen.getByRole('button', { name: 'Synchronize channel prices' })
+  )
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith('/api/channel/7/costs/sync')
+  )
+  await waitFor(() => expect(selector).toBeEnabled())
+  await user.click(selector)
+  await user.click(
+    await screen.findByRole('option', { name: 'Happy backup #8 · HappyAPI' })
+  )
+  expect(screen.getAllByRole('table')).toHaveLength(1)
+  expect(screen.getByText('¥0.24')).toBeVisible()
+  expect(screen.queryByText('¥0.2')).not.toBeInTheDocument()
+  expect(post).toHaveBeenCalledTimes(1)
+  expect(patch).not.toHaveBeenCalled()
+  expect(get.mock.calls.every(([url]) => url === '/api/channel/costs')).toBe(
+    true
+  )
+})
+
+it('keeps a failed source scoped to the same channel when retrying', async () => {
+  vi.spyOn(api, 'get').mockResolvedValue({
+    data: { success: true, data: [channelSource(7, 'Happy', 0.2)] },
   })
   const post = vi
     .spyOn(api, 'post')
     .mockResolvedValueOnce({
       data: { success: false, message: 'Source unavailable' },
     })
-    .mockResolvedValue({
-      data: {
-        success: true,
-        data: {
-          prices: {},
-          differences: {},
-          test_results: [{ name: 'Upstream(7)', status: 'success' }],
-        },
-      },
-    })
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-  })
-  render(
-    <QueryClientProvider client={client}>
-      <UpstreamRatioSync />
-    </QueryClientProvider>
-  )
+    .mockResolvedValue({ data: { success: true } })
+  renderChannelSync()
   const user = userEvent.setup()
-  await user.click(screen.getByRole('button', { name: 'Select price sources' }))
   await user.click(
-    await screen.findByRole('checkbox', { name: 'Select Upstream' })
+    await screen.findByRole('combobox', { name: 'Price source' })
   )
-  await user.click(screen.getByRole('button', { name: 'Confirm Selection' }))
-  expect(await screen.findByText('Source unavailable')).toBeVisible()
-  expect(
-    screen.queryByText('No upstream price differences found')
-  ).not.toBeInTheDocument()
-  expect(screen.getByRole('button', { name: 'Apply Sync' })).toBeDisabled()
-  await user.click(screen.getByRole('button', { name: 'Retry' }))
-  expect(
-    await screen.findByText('No upstream price differences found')
-  ).toBeVisible()
+  await user.click(
+    await screen.findByRole('option', { name: 'Happy #7 · HappyAPI' })
+  )
+  await user.click(
+    screen.getByRole('button', { name: 'Synchronize channel prices' })
+  )
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    'Source unavailable'
+  )
+  await user.click(
+    screen.getByRole('button', { name: 'Synchronize channel prices' })
+  )
+  await waitFor(() =>
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  )
   expect(post).toHaveBeenCalledTimes(2)
   expect(post.mock.calls[0]).toEqual(post.mock.calls[1])
 })

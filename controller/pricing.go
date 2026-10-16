@@ -2,6 +2,7 @@ package controller
 
 import (
 	"maps"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -36,7 +37,11 @@ func filterPricingByUsableGroups(pricing []model.Pricing, usableGroup map[string
 }
 
 func GetPricing(c *gin.Context) {
-	pricing := model.GetPricing()
+	pricing, err := model.GetChannelCostCatalog(model.GetPricing(), time.Now())
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	userId, exists := c.Get("id")
 	usableGroup := map[string]string{}
 	groupRatio := map[string]float64{}

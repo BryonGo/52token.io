@@ -207,6 +207,8 @@ import {
   nextTaskPluginBaseUrl,
 } from '../../lib/task-plugin-base-url'
 import type { Channel } from '../../types'
+import { ChannelAccountBalanceFields } from '../channel-account-balance-fields'
+import { ChannelCostFields } from '../channel-cost-fields'
 import { ChannelPluginExtensions } from '../channel-plugin-extensions'
 import { ChannelQuickOptions } from '../channel-quick-options'
 import { ChannelTypeLogo } from '../channel-type-badge'
@@ -1869,68 +1871,6 @@ export function ChannelMutateDrawer({
     />
   )
 
-  const newAPILegacyFields = (
-    <>
-      <FormField
-        control={form.control}
-        name='super_key'
-        render={({ field }) => (
-          <FormItem>
-            <FormLabel>{t('Super admin key')}</FormLabel>
-            <FormControl>
-              <Textarea
-                className='font-mono'
-                rows={2}
-                placeholder={
-                  isEditing
-                    ? t('Leave empty to keep the existing key')
-                    : t('Account-level access token of the upstream gateway')
-                }
-                {...field}
-              />
-            </FormControl>
-            <FormDescription>
-              {t(
-                'Used only to query the upstream account balance; relay requests keep using the API key above'
-              )}
-            </FormDescription>
-            <FormMessage />
-          </FormItem>
-        )}
-      />
-      <FormField
-        control={form.control}
-        name='super_key_user_id'
-        render={({ field }) => (
-          <FormItem>
-            <FormLabel>{t('Super admin key user ID')}</FormLabel>
-            <FormControl>
-              <Input
-                type='number'
-                placeholder='0'
-                {...field}
-                value={field.value ?? ''}
-                onChange={(event) =>
-                  field.onChange(
-                    event.target.value === ''
-                      ? undefined
-                      : Number(event.target.value)
-                  )
-                }
-              />
-            </FormControl>
-            <FormDescription>
-              {t(
-                'Filled only when the upstream station expects the New-Api-User header'
-              )}
-            </FormDescription>
-            <FormMessage />
-          </FormItem>
-        )}
-      />
-    </>
-  )
-
   const passthroughFields = (
     <FormField
       control={form.control}
@@ -2711,6 +2651,7 @@ export function ChannelMutateDrawer({
           </fieldset>
         )}
       </ChannelBasicSection>
+      <ChannelCostFields form={form} disabled={sensitiveLocked} />
     </div>
   )
 
@@ -4536,8 +4477,17 @@ export function ChannelMutateDrawer({
                 }}
               />
 
-              {currentType === CHANNEL_TYPE_NEW_API_LEGACY &&
-                newAPILegacyFields}
+              {[
+                CHANNEL_TYPE_NEW_API_LEGACY,
+                CHANNEL_TYPE_NEW_API,
+                CHANNEL_TYPE_ADVANCED_CUSTOM,
+              ].includes(currentType) && (
+                <ChannelAccountBalanceFields
+                  form={form}
+                  disabled={sensitiveLocked}
+                  isEditing={isEditing}
+                />
+              )}
 
               {currentType === 57 && (
                 <div className='border-border/60 flex flex-col gap-3 border-y py-4'>

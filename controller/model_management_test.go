@@ -2,6 +2,7 @@ package controller
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -490,6 +491,10 @@ export function parseTaskResult() { return {}; }
 			}
 			db := modelManagementDB(t, dialect.kind, os.Getenv(dialect.env))
 
+			t.Run("channel_account_balance", testChannelAccountBalanceIsolation)
+
+			t.Run("sub2api_cost_and_balance", testSub2APICostAndBalance)
+
 			t.Run("square_states_follow_catalog_policy", func(t *testing.T) {
 				records := []model.Model{
 					{ModelName: "square-visible", Status: 1},
@@ -947,12 +952,50 @@ export function parseTaskResult() { return {}; }
 				var ability model.Ability
 				require.NoError(t, db.Where("model = ? AND channel_id = ? AND enabled = ?", "matrix-hidden-unpriced", active.Id, true).First(&ability).Error)
 			})
+			t.Run("metadata_sources_and_partial_fill", func(t *testing.T) {
+				cfg, version, err := model.GetMetadataSources()
+				require.NoError(t, err)
+				cfg.ChannelFallback = false
+				cfg.Aliases = append(cfg.Aliases, model.MetadataAlias{Match: "exact", Name: "internal-opus", MetadataModel: "claude-opus-4-7"})
+				require.NoError(t, model.SaveMetadataSources(cfg, version))
+				saved, next, err := model.GetMetadataSources()
+				require.NoError(t, err)
+				assert.Equal(t, cfg, saved)
+				assert.NotEqual(t, version, next)
+				require.Error(t, model.SaveMetadataSources(cfg, version), "stale settings must not overwrite another admin")
+				// Restore defaults so subsequent metadata tests remain independent.
+				require.NoError(t, model.SaveMetadataSources(model.DefaultMetadataSources(), next))
+				local := &model.Model{ModelName: "partial-grok", Description: "Keep local description", Status: 0, SyncOfficial: 1}
+				require.NoError(t, local.Insert())
+				values := model.MetadataValues{Vendor: "xAI", Icon: "XAI", NameRule: 0, Status: 1}
+				version = model.MetadataRecordVersion(local, nil, nil)
+				_, err = model.ApplyMetadataSync([]model.MetadataSyncUpdate{{MetadataSyncSelection: model.MetadataSyncSelection{ModelName: local.ModelName, RecordVersion: version, Fields: []string{"vendor", "icon"}}, Values: values, FillOnly: true}}, map[string]model.Vendor{"xAI": {Name: "xAI", Icon: "XAI", Status: 1}})
+				require.NoError(t, err)
+				var persisted model.Model
+				require.NoError(t, db.First(&persisted, local.Id).Error)
+				assert.Equal(t, "Keep local description", persisted.Description)
+				assert.Zero(t, persisted.Status)
+				assert.Positive(t, persisted.VendorID)
+				var vendor model.Vendor
+				require.NoError(t, db.First(&vendor, persisted.VendorID).Error)
+				t.Cleanup(func() { require.NoError(t, db.Delete(&persisted).Error); require.NoError(t, db.Delete(&vendor).Error) })
+				_, err = model.ApplyMetadataSync([]model.MetadataSyncUpdate{{MetadataSyncSelection: model.MetadataSyncSelection{ModelName: local.ModelName, RecordVersion: model.MetadataRecordVersion(&persisted, &vendor, &vendor), Fields: []string{"description"}}, Values: model.MetadataValues{Description: "Must not overwrite"}, FillOnly: true}}, nil)
+				require.ErrorIs(t, err, model.ErrMetadataSyncConflict)
+			})
 			t.Run("metadata_preview_selection_versions_and_transaction", func(t *testing.T) {
+				previousFetch := fetchChannelMetadata
+				fetchChannelMetadata = func(context.Context) (service.SupplementalMetadata, error) {
+					return service.SupplementalMetadata{Models: map[string]model.MetadataValues{"grok-4.2": {Vendor: "xAI", Icon: "XAI", Status: 1}}, Vendors: map[string]model.Vendor{"xAI": {Name: "xAI", Icon: "XAI", Status: 1}}, Origins: map[string][]service.MetadataOrigin{"grok-4.2": {{ChannelID: 7, ChannelName: "Own channel", SourceName: "Own source", UpstreamModel: "grok-4.2"}}}}, nil
+				}
+				t.Cleanup(func() { fetchChannelMetadata = previousFetch })
+
 				local := &model.Model{ModelName: "matrix-existing", Description: "Local description", Tags: "keep", Status: 1, SyncOfficial: 1}
 				require.NoError(t, local.Insert())
 				blocked := &model.Model{ModelName: "matrix-blocked", Status: 1, SyncOfficial: 0}
 				require.NoError(t, blocked.Insert())
 				require.NoError(t, db.Create(&model.Ability{Model: "matrix-new", Group: "default", ChannelId: 1, Enabled: true}).Error)
+				require.NoError(t, db.Create(&model.Ability{Model: "claude-opus-4-7-high", Group: "default", ChannelId: 1, Enabled: true}).Error)
+				require.NoError(t, db.Create(&model.Ability{Model: "grok-4.2", Group: "default", ChannelId: 7, Enabled: true}).Error)
 				var revision atomic.Int32
 				var failVendors atomic.Bool
 				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -970,6 +1013,7 @@ export function parseTaskResult() { return {}; }
 							{ModelName: "matrix-new", Description: "New model", VendorName: "Matrix vendor", Status: 0, Endpoints: []byte(`{"openai":"/v1/chat/completions"}`)},
 							{ModelName: "matrix-blocked", Description: "Do not overwrite", Status: 1},
 							{ModelName: "matrix-catalog", Description: "Catalog only", Status: 1},
+							{ModelName: "claude-opus-4-7", Description: "Claude base description", Status: 1},
 						}
 					}
 					encoded, err := common.Marshal(payload)
@@ -994,6 +1038,14 @@ export function parseTaskResult() { return {}; }
 					byName[candidate.ModelName] = candidate
 				}
 				assert.Equal(t, "site", byName["matrix-new"].Scope)
+				assert.Equal(t, "create", byName["claude-opus-4-7-high"].Kind)
+				assert.Equal(t, "claude-opus-4-7", byName["claude-opus-4-7-high"].MetadataModel)
+				assert.Equal(t, "xAI", byName["grok-4.2"].Upstream.Vendor)
+				assert.Equal(t, "Own channel", byName["grok-4.2"].MetadataOrigins[0].ChannelName)
+				for _, field := range byName["grok-4.2"].Fields {
+					assert.NotEqual(t, "description", field.Field)
+					assert.NotEqual(t, "status", field.Field)
+				}
 				assert.Equal(t, "catalog", byName["matrix-catalog"].Scope)
 				assert.Equal(t, "blocked", byName["matrix-blocked"].Kind)
 				var count int64
@@ -1002,6 +1054,8 @@ export function parseTaskResult() { return {}; }
 				body := map[string]any{"locale": "zh", "source_version": preview.Data.Source.Version, "selections": []model.MetadataSyncSelection{
 					{ModelName: "matrix-existing", RecordVersion: byName["matrix-existing"].RecordVersion, Fields: []string{"description", "endpoints"}},
 					{ModelName: "matrix-new", RecordVersion: byName["matrix-new"].RecordVersion, Create: true},
+					{ModelName: "claude-opus-4-7-high", RecordVersion: byName["claude-opus-4-7-high"].RecordVersion, Create: true},
+					{ModelName: "grok-4.2", RecordVersion: byName["grok-4.2"].RecordVersion, Create: true, Fields: []string{"vendor", "icon"}},
 				}}
 				beforePricing, err := model.GetModelPricingSnapshot([]string{"matrix-priced"})
 				require.NoError(t, err)
@@ -1027,8 +1081,12 @@ export function parseTaskResult() { return {}; }
 				response = modelManagementRequest(t, SyncUpstreamModels, "POST", "/api/models/sync_upstream", body, &result)
 				require.Equal(t, http.StatusOK, response.Code, response.Body.String())
 				require.True(t, result.Success)
-				assert.Equal(t, []string{"matrix-new"}, result.Data.CreatedModels)
-				assert.Equal(t, []string{"Matrix vendor"}, result.Data.CreatedVendors)
+				assert.Equal(t, []string{"matrix-new", "claude-opus-4-7-high", "grok-4.2"}, result.Data.CreatedModels)
+				var alias model.Model
+				require.NoError(t, db.Where("model_name = ?", "claude-opus-4-7-high").First(&alias).Error)
+				assert.Equal(t, "Claude base description", alias.Description)
+				assert.Equal(t, model.NameRuleExact, alias.NameRule)
+				assert.Equal(t, []string{"Matrix vendor", "xAI"}, result.Data.CreatedVendors)
 				require.NoError(t, db.First(&persisted, local.Id).Error)
 				assert.Equal(t, "Upstream 0", persisted.Description)
 				assert.Equal(t, "keep", persisted.Tags)

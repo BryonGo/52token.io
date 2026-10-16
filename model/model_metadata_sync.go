@@ -58,7 +58,8 @@ type MetadataSyncSelection struct {
 
 type MetadataSyncUpdate struct {
 	MetadataSyncSelection
-	Values MetadataValues
+	Values   MetadataValues
+	FillOnly bool
 }
 
 type MetadataSyncResult struct {
@@ -202,6 +203,26 @@ func ApplyMetadataSync(updates []MetadataSyncUpdate, upstreamVendors map[string]
 			}
 			if MetadataRecordVersion(local, localVendor, FindMetadataVendor(vendors, update.Values.Vendor)) != update.RecordVersion {
 				return fmt.Errorf("%w: %s", ErrMetadataSyncConflict, update.ModelName)
+			}
+			if update.FillOnly && local != nil {
+				for _, field := range update.Fields {
+					empty := false
+					switch field {
+					case "description":
+						empty = local.Description == ""
+					case "icon":
+						empty = local.Icon == ""
+					case "tags":
+						empty = local.Tags == ""
+					case "endpoints":
+						empty = local.Endpoints == ""
+					case "vendor":
+						empty = local.VendorID == 0
+					}
+					if !empty {
+						return fmt.Errorf("%w: %s", ErrMetadataSyncConflict, update.ModelName)
+					}
+				}
 			}
 			if update.Create && local != nil || !update.Create && local == nil {
 				return ErrMetadataSyncConflict

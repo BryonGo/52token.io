@@ -55,6 +55,11 @@ func registerChannelRoutes(apiRouter *gin.RouterGroup) {
 }
 
 var channelPermissionRoutes = []permissionRoute{
+	{method: http.MethodGet, path: "/price-sources", permission: authz.ChannelRead, handler: controller.GetChannelPriceSources},
+	{method: http.MethodPut, path: "/price-sources", permission: authz.ChannelSensitiveWrite, handler: controller.SaveChannelPriceSource},
+	{method: http.MethodPost, path: "/price-sources/preview", permission: authz.ChannelSensitiveWrite, handler: controller.PreviewChannelPriceSource},
+	{method: http.MethodGet, path: "/costs", permission: authz.ChannelRead, handler: controller.GetChannelCosts},
+	{method: http.MethodPost, path: "/:id/costs/sync", permission: authz.ChannelSensitiveWrite, handler: controller.SyncChannelCosts},
 	{method: http.MethodGet, path: "/", permission: authz.ChannelRead, handler: controller.GetAllChannels},
 	{method: http.MethodGet, path: "/search", permission: authz.ChannelRead, handler: controller.SearchChannels},
 	{method: http.MethodGet, path: "/models", permission: authz.ChannelRead, handler: controller.ChannelListModels},

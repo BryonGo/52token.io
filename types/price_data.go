@@ -2,6 +2,7 @@ package types
 
 import (
 	"fmt"
+	"github.com/QuantumNous/new-api/pkg/channelcost"
 	"math"
 
 	"github.com/shopspring/decimal"
@@ -14,6 +15,7 @@ type GroupRatioInfo struct {
 }
 
 type PriceData struct {
+	ChannelCost          *channelcost.Receipt
 	FreeModel            bool
 	ModelPrice           float64
 	ModelRatio           float64

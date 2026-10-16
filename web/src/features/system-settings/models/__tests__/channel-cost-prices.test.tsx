@@ -1,0 +1,173 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { fireEvent, render, screen, within } from '@testing-library/react'
+import { afterEach, describe, expect, test, vi } from 'vitest'
+
+import { api } from '@/lib/api'
+
+import { ChannelCostPrices } from '../channel-cost-prices'
+
+const clients: QueryClient[] = []
+afterEach(() => {
+  vi.restoreAllMocks()
+  clients.forEach((client) => client.clear())
+  clients.length = 0
+})
+function setup() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  })
+  clients.push(client)
+  render(
+    <QueryClientProvider client={client}>
+      <ChannelCostPrices />
+    </QueryClientProvider>
+  )
+}
+const price = {
+  model: 'DeepSeek-V3',
+  cost: {
+    model: 'DeepSeek-V3',
+    upstream: { input: 1, output: 4, cache_read: 0.25 },
+    cny: { input: 0.2, output: 0.8, cache_read: 0.05 },
+    upstream_group_ratio: 1,
+    tier: 'standard',
+    synced_at: 1792112400,
+    source_url: 'https://happyapi.org/api/pricing',
+  },
+}
+describe('channel CNY costs', () => {
+  test('keeps identically named models in separate channels and displays converted yuan once', async () => {
+    vi.spyOn(api, 'get').mockResolvedValue({
+      data: {
+        success: true,
+        data: [
+          {
+            id: 1,
+            name: 'Happy',
+            status: 1,
+            config: {
+              source: 'happyapi',
+              credits_per_cny: 5,
+              upstream_group: 'default',
+            },
+            prices: [price],
+          },
+          {
+            id: 2,
+            name: 'Second channel',
+            status: 1,
+            config: {
+              source: 'happyapi',
+              credits_per_cny: 5,
+              upstream_group: 'vip',
+            },
+            prices: [
+              {
+                ...price,
+                cost: {
+                  ...price.cost,
+                  upstream: { ...price.cost.upstream, input: 1.2, output: 5 },
+                  cny: { input: 0.24, output: 1, cache_read: 0.06 },
+                },
+              },
+            ],
+          },
+        ],
+      },
+    })
+    setup()
+    const tables = await screen.findAllByRole('table')
+    expect(tables).toHaveLength(2)
+    expect(within(tables[0]).getByText('¥0.2')).toBeInTheDocument()
+    expect(within(tables[0]).getByText('¥0.8')).toBeInTheDocument()
+    expect(within(tables[1]).getByText('¥0.24')).toBeInTheDocument()
+    expect(within(tables[1]).getByText('¥1')).toBeInTheDocument()
+  })
+  test('displays failed synchronization and leaves the retry button available', async () => {
+    vi.spyOn(api, 'get').mockResolvedValue({
+      data: {
+        success: true,
+        data: [
+          {
+            id: 1,
+            name: 'Happy',
+            status: 1,
+            config: {
+              source: 'happyapi',
+              credits_per_cny: 5,
+              upstream_group: 'default',
+            },
+            prices: [
+              { model: 'missing', error: 'Channel prices are unavailable' },
+            ],
+          },
+        ],
+      },
+    })
+    vi.spyOn(api, 'post').mockRejectedValue(new Error('Upstream unavailable'))
+    setup()
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Synchronize channel prices' })
+    )
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Upstream unavailable'
+    )
+    expect(
+      screen.getByRole('button', { name: 'Synchronize channel prices' })
+    ).toBeEnabled()
+  })
+  test('explains how to enable pricing when no channels are configured', async () => {
+    vi.spyOn(api, 'get').mockResolvedValue({
+      data: { success: true, data: [] },
+    })
+    setup()
+    expect(
+      await screen.findByText(
+        'Enable CNY cost billing in a channel to synchronize its prices.'
+      )
+    ).toBeInTheDocument()
+  })
+})
+
+test('displays upstream and CNY request prices without misleading token prices', async () => {
+  vi.spyOn(api, 'get').mockResolvedValue({
+    data: {
+      success: true,
+      data: [
+        {
+          id: 126,
+          name: 'Happy request channel',
+          status: 1,
+          config: {
+            source: 'happyapi',
+            credits_per_cny: 5,
+            upstream_group: 'default',
+          },
+          prices: [
+            {
+              model: 'grok-4-fast-ci',
+              cost: {
+                ...price.cost,
+                upstream_request_price: 0.025,
+                cny_request_price: 0.005,
+                tier: 'request',
+                expression: 'tier("request", fixed(0.005))',
+                upstream: { input: 0, output: 0, cache_read: 0 },
+                cny: { input: 0, output: 0, cache_read: 0 },
+              },
+            },
+          ],
+        },
+      ],
+    },
+  })
+  setup()
+  const row = (await screen.findByText('grok-4-fast-ci')).closest('tr')
+  expect(row).not.toBeNull()
+  expect(row).toHaveTextContent('0.025')
+  expect(row).toHaveTextContent('¥0.005')
+  expect(row).not.toHaveTextContent('¥0.00 ')
+  expect(
+    within(row as HTMLTableRowElement).getByText('Per-request')
+  ).toBeVisible()
+})

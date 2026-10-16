@@ -42,8 +42,10 @@ import { SettingsPageTitleStatusPortal } from '../components/settings-page-conte
 import { SettingsSection } from '../components/settings-section'
 import { useUpdateOption } from '../hooks/use-update-option'
 import { positiveIntegerSchema } from '../utils/numeric-field'
+import { ChannelCostPrices } from './channel-cost-prices'
 import { GroupRatioForm } from './group-ratio-form'
 import { ModelRatioForm } from './model-ratio-form'
+import { PriceSourceManager } from './price-source-manager'
 import { ToolPriceSettings } from './tool-price-settings'
 import { UpstreamRatioSync } from './upstream-ratio-sync'
 import {
@@ -150,6 +152,8 @@ const createGroupSchema = (t: Translate) =>
 type ModelFormValues = z.infer<ReturnType<typeof createModelSchema>>
 type GroupFormValues = z.infer<ReturnType<typeof createGroupSchema>>
 type RatioTabId =
+  | 'price-sources'
+  | 'channel-costs'
   | 'models'
   | 'unset-models'
   | 'groups'
@@ -454,6 +458,8 @@ export function RatioSettingsCard({
   }, [resetMutate])
 
   const tabLabels: Record<RatioTabId, string> = {
+    'channel-costs': 'Channel CNY costs',
+    'price-sources': 'Price sources',
     models: 'Model prices',
     'unset-models': 'Unset price models',
     groups: 'Group ratios',
@@ -467,10 +473,13 @@ export function RatioSettingsCard({
       3: 'grid-cols-3',
       4: 'grid-cols-4',
       5: 'grid-cols-5',
+      6: 'grid-cols-6',
     }[visibleTabs.length] ?? 'grid-cols-4'
   const defaultTab = visibleTabs[0] ?? 'models'
 
   const renderTabContent = (tab: RatioTabId) => {
+    if (tab === 'price-sources') return <PriceSourceManager />
+    if (tab === 'channel-costs') return <ChannelCostPrices />
     if (tab === 'models' || tab === 'unset-models') {
       if (pricingQuery.isError) {
         return (

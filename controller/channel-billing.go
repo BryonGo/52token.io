@@ -1,12 +1,15 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +17,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/channelcost"
 	"github.com/QuantumNous/new-api/relay/channel/advancedcustom"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
@@ -426,8 +430,7 @@ func updateChannelSub2APIBalance(channel *model.Channel) (float64, error) {
 	if baseURL == "" {
 		return 0, errors.New("Sub2API channel is missing base_url")
 	}
-	url := fmt.Sprintf("%s/v1/usage", strings.TrimRight(baseURL, "/"))
-	body, err := GetResponseBody("GET", url, channel, GetAuthHeader(channel.Key))
+	body, err := service.FetchSub2APIDocument(context.Background(), channel, "/v1/usage")
 	if err != nil {
 		return 0, err
 	}
@@ -443,8 +446,8 @@ func updateChannelSub2APIBalance(channel *model.Channel) (float64, error) {
 		} `json:"subscription"`
 	}
 	usage := sub2apiUsageResponse{}
-	if err := common.Unmarshal(body, &usage); err != nil {
-		return 0, err
+	if common.Unmarshal(body, &usage) != nil {
+		return 0, errors.New("Invalid Sub2API account response")
 	}
 	if usage.IsValid != nil && !*usage.IsValid {
 		return 0, errors.New("Sub2API key is invalid (isValid=false)")
@@ -464,8 +467,18 @@ func updateChannelSub2APIBalance(channel *model.Channel) (float64, error) {
 	if subscription != nil && subscription.DailyLimitUSD == nil && subscription.WeeklyLimitUSD == nil && subscription.MonthlyLimitUSD == nil {
 		return 0, errors.New("Sub2API /v1/usage reports an unlimited subscription without a finite balance")
 	}
-	channel.UpdateBalance(*balance)
-	return *balance, nil
+	value := *balance
+	if cfg := channel.GetOtherSettings().CostBilling; cfg != nil && cfg.Enabled {
+		if !channelcost.Positive(cfg.CreditsPerCNY) || !channelcost.Positive(operation_setting.USDExchangeRate) {
+			return 0, common.NewMessage("Invalid channel balance conversion")
+		}
+		value = value / cfg.CreditsPerCNY / operation_setting.USDExchangeRate
+	}
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0, common.NewMessage("Invalid channel balance conversion")
+	}
+	channel.UpdateBalance(value)
+	return value, nil
 }
 
 // updateChannelNewAPIBalance reads the upstream key's remaining quota. When the
@@ -538,50 +551,112 @@ func fetchNewAPIQuotaPerUnit(channel *model.Channel, baseURL string) (float64, e
 	return status.Data.QuotaPerUnit, nil
 }
 
-// updateChannelNewAPILegacyBalance reports the account balance of a new-api
-// gateway running an older release. Such a station never returns its owner's
-// quota from /api/usage/token/ and commonly runs unlimited tokens, so the key
-// query cannot produce a number; the account-level access token (超级管理 key)
-// stored in the channel settings is used instead. When no access token is
-// configured, the key-based query is attempted as a fallback.
+// updateChannelNewAPILegacyBalance uses the upstream account access token when
+// configured, including for older gateways that omit owner quota from token
+// usage. The model API key remains separate and is the fallback when unconfigured.
 func updateChannelNewAPILegacyBalance(channel *model.Channel) (float64, error) {
 	setting := channel.GetSetting()
 	superKey := strings.TrimSpace(setting.SuperKey)
+	if len(superKey) > 8192 || strings.ContainsAny(superKey, "\r\n") || setting.SuperKeyUserID < 0 {
+		return 0, common.NewMessage("Invalid upstream account balance credentials")
+	}
 	if superKey == "" {
 		return updateChannelNewAPIBalance(channel)
-	}
-	baseURL := strings.TrimRight(channel.GetBaseURL(), "/")
-	if baseURL == "" {
-		return 0, errors.New("New API (Legacy) channel is missing base_url")
 	}
 	headers := GetAuthHeader(superKey)
 	if setting.SuperKeyUserID > 0 {
 		headers.Set("New-Api-User", strconv.Itoa(setting.SuperKeyUserID))
 	}
-	body, err := GetResponseBody("GET", baseURL+"/api/user/self", channel, headers)
+	body, err := fetchNewAPIAccountBalanceDocument(channel, "/api/user/self", headers)
 	if err != nil {
 		return 0, err
 	}
 	var self struct {
-		Success bool   `json:"success"`
-		Message string `json:"message"`
-		Data    struct {
-			Quota float64 `json:"quota"`
+		Success bool `json:"success"`
+		Data    *struct {
+			Quota *float64 `json:"quota"`
 		} `json:"data"`
 	}
-	if err := common.Unmarshal(body, &self); err != nil {
-		return 0, err
+	if common.Unmarshal(body, &self) != nil {
+		return 0, common.NewMessage("Invalid upstream account balance response")
 	}
 	if !self.Success {
-		return 0, fmt.Errorf("New API (Legacy) account query failed: %s", self.Message)
+		return 0, common.NewMessage("The upstream rejected the account balance credentials")
 	}
-	quotaPerUnit, err := fetchNewAPIQuotaPerUnit(channel, baseURL)
+	if self.Data == nil || self.Data.Quota == nil || math.IsNaN(*self.Data.Quota) || math.IsInf(*self.Data.Quota, 0) {
+		return 0, common.NewMessage("Upstream account balance is missing or invalid")
+	}
+	body, err = fetchNewAPIAccountBalanceDocument(channel, "/api/status", nil)
 	if err != nil {
 		return 0, err
 	}
-	balance := self.Data.Quota / quotaPerUnit
+	var status struct {
+		Success *bool `json:"success"`
+		Data    struct {
+			QuotaPerUnit float64 `json:"quota_per_unit"`
+		} `json:"data"`
+	}
+	if common.Unmarshal(body, &status) != nil || status.Success != nil && !*status.Success || status.Data.QuotaPerUnit <= 0 || math.IsNaN(status.Data.QuotaPerUnit) || math.IsInf(status.Data.QuotaPerUnit, 0) {
+		return 0, common.NewMessage("Upstream quota unit is missing or invalid")
+	}
+	balance := *self.Data.Quota / status.Data.QuotaPerUnit
+	if cfg := channel.GetOtherSettings().CostBilling; cfg != nil && cfg.Enabled {
+		if cfg.CreditsPerCNY <= 0 || math.IsNaN(cfg.CreditsPerCNY) || math.IsInf(cfg.CreditsPerCNY, 0) || operation_setting.USDExchangeRate <= 0 || math.IsNaN(operation_setting.USDExchangeRate) || math.IsInf(operation_setting.USDExchangeRate, 0) {
+			return 0, common.NewMessage("Invalid channel balance conversion")
+		}
+		// Channel.Balance uses normalized USD for the existing shared formatter.
+		// Cost channels first turn upstream credits into their actual CNY cost.
+		balance = balance / cfg.CreditsPerCNY / operation_setting.USDExchangeRate
+	}
+	if math.IsNaN(balance) || math.IsInf(balance, 0) {
+		return 0, common.NewMessage("Invalid channel balance conversion")
+	}
 	channel.UpdateBalance(balance)
 	return balance, nil
+}
+
+// Account credentials go only to the channel's own account endpoint. Never
+// follow redirects or include an upstream response/profile in management output.
+func fetchNewAPIAccountBalanceDocument(channel *model.Channel, path string, headers http.Header) ([]byte, error) {
+	base := strings.TrimRight(channel.GetBaseURL(), "/")
+	endpoint, err := url.Parse(base)
+	if err != nil || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+		return nil, common.NewMessage("Invalid upstream account balance URL")
+	}
+	ip := net.ParseIP(endpoint.Hostname())
+	loopback := strings.EqualFold(endpoint.Hostname(), "localhost") || ip != nil && ip.IsLoopback()
+	if endpoint.Scheme != "https" && !(endpoint.Scheme == "http" && loopback) {
+		return nil, common.NewMessage("Account balance credentials require HTTPS")
+	}
+	req, err := http.NewRequest(http.MethodGet, base+path, nil)
+	if err != nil {
+		return nil, common.NewMessage("Invalid upstream account balance URL")
+	}
+	req.Header = headers.Clone()
+	setting := channel.GetSetting()
+	if setting.TLSInsecureSkipVerify || common.TLSInsecureSkipVerify {
+		return nil, common.NewMessage("Account balance credentials require certificate verification")
+	}
+	client, err := service.GetHttpClientWithProxySettings(setting.Proxy, setting)
+	if err != nil {
+		return nil, common.NewMessage("Unable to query upstream account balance")
+	}
+	isolated := *client
+	isolated.Timeout = 20 * time.Second
+	isolated.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := isolated.Do(req)
+	if err != nil {
+		return nil, common.NewMessage("Unable to query upstream account balance")
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, common.NewMessage("Account balance request returned HTTP {{status}}", map[string]any{"status": response.StatusCode})
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxAdvancedCustomBalanceResponseBytes+1))
+	if err != nil || len(body) > maxAdvancedCustomBalanceResponseBytes {
+		return nil, common.NewMessage("Invalid upstream account balance response")
+	}
+	return body, nil
 }
 
 func fetchAdvancedCustomBalance(channel *model.Channel) (channelBalanceResult, error) {
@@ -671,6 +746,10 @@ func fetchAdvancedCustomBalance(channel *model.Channel) (channelBalanceResult, e
 }
 
 func updateChannelBalance(channel *model.Channel) (channelBalanceResult, error) {
+	if (channel.Type == constant.ChannelTypeAdvancedCustom || channel.Type == constant.ChannelTypeNewAPI || channel.Type == constant.ChannelTypeNewAPILegacy) && strings.TrimSpace(channel.GetSetting().SuperKey) != "" {
+		balance, err := updateChannelNewAPILegacyBalance(channel)
+		return channelBalanceResult{Balance: balance}, err
+	}
 	if channel.Type == constant.ChannelTypeAdvancedCustom {
 		return fetchAdvancedCustomBalance(channel)
 	}

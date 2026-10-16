@@ -2,9 +2,13 @@ package helper
 
 import (
 	"fmt"
+	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/channelcost"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
@@ -745,3 +749,170 @@ func (s *priceTestReservation) Refund(*gin.Context)      {}
 func (s *priceTestReservation) NeedsRefund() bool        { return false }
 func (s *priceTestReservation) GetPreConsumedQuota() int { return s.held }
 func (s *priceTestReservation) Reserve(quota int) error  { s.held = max(s.held, quota); return nil }
+
+func TestChannelCostSameModelRepricesRetryWithoutLocalMarkup(t *testing.T) {
+	oldPrice := operation_setting.Price
+	operation_setting.Price = 7
+	oldCache, oldFX := common.MemoryCacheEnabled, operation_setting.USDExchangeRate
+	common.MemoryCacheEnabled = true
+	operation_setting.USDExchangeRate = 7
+	common.OptionMapRWMutex.Lock()
+	oldOptions := common.OptionMap
+	common.OptionMap = map[string]string{}
+	common.OptionMapRWMutex.Unlock()
+	t.Cleanup(func() {
+		operation_setting.Price = oldPrice
+		common.MemoryCacheEnabled = oldCache
+		operation_setting.USDExchangeRate = oldFX
+		common.OptionMapRWMutex.Lock()
+		common.OptionMap = oldOptions
+		common.OptionMapRWMutex.Unlock()
+	})
+	now := time.Now()
+	for _, tc := range []struct {
+		id            int
+		input, output float64
+	}{{920001, 1, 4}, {920002, 1.2, 5}} {
+		ch := &model.Channel{Id: tc.id, Type: 1, Key: "fixture", Models: "DeepSeek-V3"}
+		ch.SetOtherSettings(dto.ChannelOtherSettings{CostBilling: &dto.ChannelCostSettings{Enabled: true, Source: "happyapi", CreditsPerCNY: 5, UpstreamGroup: "default"}})
+		model.CacheUpdateChannel(ch)
+		snap := channelcost.Snapshot{Fingerprint: model.ChannelCostFingerprint(ch), SyncedAt: now.Unix(), GroupRatio: 1, Prices: map[string]channelcost.Price{"DeepSeek-V3": {UpstreamModel: "DeepSeek-V3", OffPeak: channelcost.Rates{Input: tc.input, Output: tc.output, CacheRead: tc.input}}}}
+		value, err := common.Marshal(snap)
+		require.NoError(t, err)
+		common.OptionMap[fmt.Sprintf("channel_cost.%d", tc.id)] = string(value)
+	}
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	info := &relaycommon.RelayInfo{OriginModelName: "DeepSeek-V3", RelayFormat: types.RelayFormatOpenAI, Request: &dto.GeneralOpenAIRequest{}, BillingRequestInput: &billingexpr.RequestInput{Body: []byte(`{"model":"DeepSeek-V3"}`)}}
+	info.SetEstimatePromptTokens(1000000)
+	common.SetContextKey(c, constant.ContextKeyChannelId, 920001)
+	first, err := ModelPriceHelper(c, info, 1000000, &types.TokenCountMeta{})
+	require.NoError(t, err)
+	assert.InDelta(t, 0.2, first.ChannelCost.CNY.Input, 1e-10)
+	assert.Equal(t, 1.0, first.GroupRatioInfo.GroupRatio)
+	firstExpr := info.TieredBillingSnapshot.ExprString
+	common.SetContextKey(c, constant.ContextKeyChannelId, 920002)
+	info.PriceData.GroupRatioInfo.GroupRatio = 5
+	changed, err := RefreshChannelCostPricing(c, info)
+	require.NoError(t, err)
+	assert.True(t, changed)
+	assert.InDelta(t, 0.24, info.PriceData.ChannelCost.CNY.Input, 1e-10)
+	assert.Equal(t, 1.0, info.PriceData.ChannelCost.CNY.Output)
+	assert.Equal(t, 1.0, info.PriceData.GroupRatioInfo.GroupRatio)
+	assert.NotEqual(t, firstExpr, info.TieredBillingSnapshot.ExprString)
+	snapshot := info.TieredBillingSnapshot
+	ok, quota, _ := service.TryTieredSettle(info, billingexpr.TokenParams{P: 1000000, C: 1000000})
+	require.True(t, ok)
+	assert.InDelta(t, 1.24, float64(quota)/snapshot.QuotaPerUnit*7, 0.00002)
+	operation_setting.Price = 1
+	_, err = RefreshChannelCostPricing(c, info)
+	require.ErrorContains(t, err, "matching wallet recharge and display")
+	operation_setting.Price = 7
+	common.OptionMap["channel_cost.920002"] = "{}"
+	_, err = RefreshChannelCostPricing(c, info)
+	require.Error(t, err, "missing retry-channel price must not fall back to global model price")
+}
+
+func TestConfirmedReferenceLocalGroupChargesOnceAndRejectsMarkup(t *testing.T) {
+	oldPrice, oldFX, oldCache := operation_setting.Price, operation_setting.USDExchangeRate, common.MemoryCacheEnabled
+	oldGroups := ratio_setting.GroupRatio2JSONString()
+	common.OptionMapRWMutex.Lock()
+	oldOptions := common.OptionMap
+	common.OptionMap = map[string]string{}
+	common.OptionMapRWMutex.Unlock()
+	operation_setting.Price, operation_setting.USDExchangeRate = 1, 1
+	common.MemoryCacheEnabled = true
+	t.Cleanup(func() {
+		operation_setting.Price, operation_setting.USDExchangeRate, common.MemoryCacheEnabled = oldPrice, oldFX, oldCache
+		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(oldGroups))
+		common.OptionMapRWMutex.Lock()
+		common.OptionMap = oldOptions
+		common.OptionMapRWMutex.Unlock()
+	})
+	source := channelcost.Source{ID: "pojia-reference-test", Name: "Confirmed reference", Enabled: true, Format: "deepseek_html", URL: channelcost.DeepSeekURL, ChannelOrigin: "https://upstream.example", UnitTokens: 1e6, InputScale: 1, Reference: &channelcost.ReferencePricing{GroupRatio: .08, Models: map[string]string{"deepseek-v4-pro": "deepseek-v4-pro"}, Schedule: "deepseek", LocalGroupBilling: true}}
+	registry, err := common.Marshal(map[string]channelcost.Source{source.ID: source})
+	require.NoError(t, err)
+	common.OptionMap["channel_price_sources"] = string(registry)
+	ch := &model.Channel{Id: 920004, Type: constant.ChannelTypeSub2API, Key: "fixture", Models: "deepseek-v4-pro", Group: "POJIA-test", BaseURL: common.GetPointer(source.ChannelOrigin)}
+	ch.SetOtherSettings(dto.ChannelOtherSettings{CostBilling: &dto.ChannelCostSettings{Enabled: true, Source: source.ID, CreditsPerCNY: 1, UpstreamGroup: "upstream-group"}})
+	model.CacheUpdateChannel(ch)
+	snap := channelcost.Snapshot{Fingerprint: model.ChannelCostFingerprint(ch), SyncedAt: time.Now().Unix(), GroupRatio: .08, Prices: map[string]channelcost.Price{"deepseek-v4-pro": {UpstreamModel: "deepseek-v4-pro", OffPeak: channelcost.Rates{Input: 4.5, Output: 13.5, CacheRead: .15}}}}
+	value, err := common.Marshal(snap)
+	require.NoError(t, err)
+	common.OptionMap["channel_cost.920004"] = string(value)
+	for _, tc := range []struct {
+		ratio, expected float64
+		reject          bool
+	}{{.08, 1.44, false}, {.04, .72, false}, {1, 0, true}} {
+		groups, e := common.Marshal(map[string]float64{"POJIA-test": tc.ratio})
+		require.NoError(t, e)
+		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(string(groups)))
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		common.SetContextKey(c, constant.ContextKeyChannelId, ch.Id)
+		info := &relaycommon.RelayInfo{OriginModelName: "deepseek-v4-pro", RelayFormat: types.RelayFormatOpenAI, UserGroup: "default", UsingGroup: "POJIA-test", Request: &dto.GeneralOpenAIRequest{}, BillingRequestInput: &billingexpr.RequestInput{Body: []byte(`{"model":"deepseek-v4-pro"}`)}}
+		price, e := ModelPriceHelper(c, info, 1000000, &types.TokenCountMeta{})
+		if tc.reject {
+			require.ErrorContains(t, e, "exceeds the upstream cost")
+			continue
+		}
+		require.NoError(t, e)
+		assert.Equal(t, tc.ratio, price.GroupRatioInfo.GroupRatio)
+		assert.InDelta(t, .36, price.ChannelCost.CNY.Input, 1e-12, "actual procurement cost stays separate from any user discount")
+		ok, quota, _ := service.TryTieredSettle(info, billingexpr.TokenParams{P: 1000000, C: 1000000})
+		require.True(t, ok)
+		assert.InDelta(t, tc.expected, float64(quota)/info.TieredBillingSnapshot.QuotaPerUnit, 1e-6)
+		if tc.ratio == .08 {
+			ok, tinyQuota, _ := service.TryTieredSettle(info, billingexpr.TokenParams{C: 1})
+			require.True(t, ok)
+			assert.LessOrEqual(t, float64(tinyQuota)/info.TieredBillingSnapshot.QuotaPerUnit, .00000108, "cost billing must not round a tiny charge above procurement cost")
+		}
+	}
+}
+
+func TestChannelRequestCostReservesOnceAndSettlesWithoutTokens(t *testing.T) {
+	oldPrice, oldFX, oldCache, oldQuota := operation_setting.Price, operation_setting.USDExchangeRate, common.MemoryCacheEnabled, common.QuotaPerUnit
+	common.MemoryCacheEnabled = true
+	common.QuotaPerUnit = 500000
+	common.OptionMapRWMutex.Lock()
+	oldOptions := common.OptionMap
+	common.OptionMap = map[string]string{}
+	common.OptionMapRWMutex.Unlock()
+	t.Cleanup(func() {
+		operation_setting.Price = oldPrice
+		operation_setting.USDExchangeRate = oldFX
+		common.MemoryCacheEnabled = oldCache
+		common.QuotaPerUnit = oldQuota
+		common.OptionMapRWMutex.Lock()
+		common.OptionMap = oldOptions
+		common.OptionMapRWMutex.Unlock()
+	})
+	for _, fx := range []float64{1, 7} {
+		operation_setting.Price = fx
+		operation_setting.USDExchangeRate = fx
+		amount := .025
+		channel := &model.Channel{Id: 920003, Type: 1, Key: "fixture", Models: "grok-4-fast-ci"}
+		channel.SetOtherSettings(dto.ChannelOtherSettings{CostBilling: &dto.ChannelCostSettings{Enabled: true, Source: "happyapi", CreditsPerCNY: 5, UpstreamGroup: "default"}})
+		model.CacheUpdateChannel(channel)
+		snapshot := &channelcost.Snapshot{Fingerprint: model.ChannelCostFingerprint(channel), SyncedAt: time.Now().Unix(), GroupRatio: 1, Prices: map[string]channelcost.Price{"grok-4-fast-ci": {UpstreamModel: "grok-4-fast-ci", RequestPrice: &amount}}}
+		raw, err := common.Marshal(snapshot)
+		require.NoError(t, err)
+		common.OptionMap["channel_cost.920003"] = string(raw)
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		common.SetContextKey(c, constant.ContextKeyChannelId, channel.Id)
+		info := &relaycommon.RelayInfo{OriginModelName: "grok-4-fast-ci", RelayFormat: types.RelayFormatOpenAI, Request: &dto.GeneralOpenAIRequest{}, BillingRequestInput: &billingexpr.RequestInput{Body: []byte(`{"model":"grok-4-fast-ci","stream":true}`)}}
+		info.SetEstimatePromptTokens(1000000)
+		price, err := ModelPriceHelper(c, info, 1000000, &types.TokenCountMeta{})
+		require.NoError(t, err)
+		want := common.QuotaRound(.005 / fx * common.QuotaPerUnit)
+		assert.Equal(t, want, price.QuotaToPreConsume)
+		assert.Equal(t, 1.0, price.GroupRatioInfo.GroupRatio)
+		assert.Equal(t, billingexpr.BillingUnitRequest, info.TieredBillingSnapshot.EstimatedBillingUnit)
+		ok, quota, result := service.TryTieredSettle(info, billingexpr.TokenParams{})
+		require.True(t, ok)
+		require.NotNil(t, result)
+		assert.Equal(t, want, quota)
+		assert.Equal(t, billingexpr.BillingUnitRequest, result.BillingUnit)
+	}
+}

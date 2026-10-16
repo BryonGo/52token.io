@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { formatBillingCurrencyFromUSD } from '@/lib/currency'
+import { formatBillingCurrencyFromUSD, formatCNYAmount } from '@/lib/currency'
 
 import { QUOTA_TYPE_VALUES, TOKEN_UNIT_DIVISORS } from '../constants'
 import type { PricingModel, TokenUnit, PriceType } from '../types'
@@ -138,6 +138,32 @@ function applyRechargeRate(
   return (price * priceRate) / usdExchangeRate
 }
 
+function formatChannelTokenPrice(
+  model: PricingModel,
+  type: PriceType,
+  tokenUnit: TokenUnit,
+  ratio: number,
+  showSymbol = true
+): string {
+  const cost = model.channel_cost
+  const rates = cost?.cny
+  if (!rates || cost?.error) return '-'
+  const prices: Partial<Record<PriceType, number>> = {
+    input: rates.input,
+    output: rates.output,
+    cache: rates.cache_read,
+    create_cache: rates.cache_write,
+  }
+  const amount = prices[type]
+  if (amount == null) return '-'
+  return formatCNYAmount((amount * ratio) / TOKEN_UNIT_DIVISORS[tokenUnit], {
+    showSymbol,
+    digitsLarge: 4,
+    digitsSmall: 8,
+    abbreviate: false,
+  })
+}
+
 /**
  * Format token-based price for display
  */
@@ -151,6 +177,15 @@ export function formatPrice(
   selectedGroup?: string,
   showCurrencySymbol = true
 ): string {
+  if (model.channel_cost) {
+    return formatChannelTokenPrice(
+      model,
+      type,
+      tokenUnit,
+      getDisplayGroupRatio(model, selectedGroup),
+      showCurrencySymbol
+    )
+  }
   if (model.quota_type === QUOTA_TYPE_VALUES.REQUEST) {
     return '-'
   }
@@ -187,6 +222,12 @@ export function formatGroupPrice(
   usdExchangeRate = 1,
   groupRatio: Record<string, number>
 ): string {
+  if (model.channel_cost) {
+    const ratio = model.channel_cost.local_group_billing
+      ? getConfiguredGroupRatio(groupRatio, group)
+      : 1
+    return formatChannelTokenPrice(model, type, tokenUnit, ratio)
+  }
   if (model.quota_type === QUOTA_TYPE_VALUES.REQUEST) {
     return '-'
   }
@@ -220,6 +261,14 @@ export function formatFixedPrice(
   usdExchangeRate = 1,
   groupRatio: Record<string, number>
 ): string {
+  if (model.channel_cost?.error) return '-'
+  if (model.channel_cost?.cny_request_price != null) {
+    return formatCNYAmount(model.channel_cost.cny_request_price, {
+      digitsLarge: 4,
+      digitsSmall: 8,
+      abbreviate: false,
+    })
+  }
   if (model.quota_type !== QUOTA_TYPE_VALUES.REQUEST) {
     return '-'
   }
@@ -252,6 +301,15 @@ export function formatRequestPrice(
   selectedGroup?: string,
   showCurrencySymbol = true
 ): string {
+  if (model.channel_cost?.error) return '-'
+  if (model.channel_cost?.cny_request_price != null) {
+    return formatCNYAmount(model.channel_cost.cny_request_price, {
+      showSymbol: showCurrencySymbol,
+      digitsLarge: 4,
+      digitsSmall: 8,
+      abbreviate: false,
+    })
+  }
   if (model.quota_type !== QUOTA_TYPE_VALUES.REQUEST) {
     return '-'
   }

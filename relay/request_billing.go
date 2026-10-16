@@ -80,3 +80,21 @@ func RefundFailedRequestBilling(c *gin.Context, info *relaycommon.RelayInfo, api
 	service.ChargeViolationFeeIfNeeded(c, info, apiErr)
 	return apiErr
 }
+
+// PrepareSelectedChannelBilling reprices retry/fallback channels before reserving.
+func PrepareSelectedChannelBilling(c *gin.Context, info *relaycommon.RelayInfo) *types.NewAPIError {
+	changed, err := helper.RefreshChannelCostPricing(c, info)
+	if err != nil {
+		return types.NewError(err, types.ErrorCodeModelPriceError, types.ErrOptionWithSkipRetry())
+	}
+	if changed && info.TieredBillingSnapshot == nil {
+		if info.Billing == nil {
+			return service.PreConsumeBilling(c, info.PriceData.QuotaToPreConsume, info)
+		}
+		if err := info.Billing.Reserve(info.PriceData.QuotaToPreConsume); err != nil {
+			return types.NewError(err, types.ErrorCodeUpdateDataError, types.ErrOptionWithSkipRetry())
+		}
+		info.FinalPreConsumedQuota = info.Billing.GetPreConsumedQuota()
+	}
+	return service.PrepareTieredBillingForSelectedGroup(c, info)
+}

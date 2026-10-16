@@ -31,7 +31,9 @@ export function PriceSyncDialog(props: {
       open={props.open}
       onOpenChange={props.onOpenChange}
       title={t('Sync model pricing')}
-      description={t('Compare prices and choose a source for each model.')}
+      description={t(
+        'Choose a channel price source. Synchronization updates only that channel and uses its recharge ratio and upstream group.'
+      )}
       contentClassName='sm:max-w-6xl'
       contentHeight='min(75vh, 800px)'
       bodyClassName='h-full'

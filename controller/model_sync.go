@@ -17,6 +17,8 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	kitreasoning "github.com/QuantumNous/new-api/relaykit/relayconvert/reasoning"
+	"github.com/QuantumNous/new-api/service"
 
 	"github.com/gin-gonic/gin"
 )
@@ -230,10 +232,12 @@ func fetchJSON[T any](ctx context.Context, url string, out *upstreamEnvelope[T])
 }
 
 type metadataSyncSource struct {
-	Locale     string `json:"locale"`
-	ModelsURL  string `json:"models_url"`
-	VendorsURL string `json:"vendors_url"`
-	Version    string `json:"version"`
+	Locale     string                    `json:"locale"`
+	ModelsURL  string                    `json:"models_url"`
+	VendorsURL string                    `json:"vendors_url"`
+	Version    string                    `json:"version"`
+	Warnings   []service.MetadataWarning `json:"warnings,omitempty"`
+	catalog    *metadataCatalog
 }
 
 type metadataSyncField struct {
@@ -243,13 +247,18 @@ type metadataSyncField struct {
 }
 
 type metadataSyncCandidate struct {
-	ModelName      string                `json:"model_name"`
-	Kind           string                `json:"kind"`
-	Scope          string                `json:"scope"`
-	RecordVersion  string                `json:"record_version"`
-	Fields         []metadataSyncField   `json:"fields"`
-	Upstream       *model.MetadataValues `json:"upstream,omitempty"`
-	VendorToCreate string                `json:"vendor_to_create,omitempty"`
+	ModelName         string                   `json:"model_name"`
+	MetadataModel     string                   `json:"metadata_model,omitempty"`
+	MetadataSource    string                   `json:"metadata_source,omitempty"`
+	FillOnly          bool                     `json:"fill_only,omitempty"`
+	MetadataOrigins   []service.MetadataOrigin `json:"metadata_origins,omitempty"`
+	MetadataConflicts []string                 `json:"metadata_conflicts,omitempty"`
+	Kind              string                   `json:"kind"`
+	Scope             string                   `json:"scope"`
+	RecordVersion     string                   `json:"record_version"`
+	Fields            []metadataSyncField      `json:"fields"`
+	Upstream          *model.MetadataValues    `json:"upstream,omitempty"`
+	VendorToCreate    string                   `json:"vendor_to_create,omitempty"`
 }
 
 func fetchMetadataCatalog(c *gin.Context, locale string) (metadataSyncSource, map[string]model.MetadataValues, map[string]model.Vendor, error) {
@@ -281,7 +290,7 @@ func fetchMetadataCatalog(c *gin.Context, locale string) (metadataSyncSource, ma
 	models := make(map[string]model.MetadataValues)
 	vendors := make(map[string]model.Vendor)
 	for _, vendor := range vendorsEnv.Data {
-		vendor.Name = strings.TrimSpace(vendor.Name)
+		vendor.Name = service.NormalizeMetadataVendor(vendor.Name)
 		if vendor.Name == "" {
 			continue
 		}
@@ -297,7 +306,7 @@ func fetchMetadataCatalog(c *gin.Context, locale string) (metadataSyncSource, ma
 				endpoints = string(item.Endpoints)
 			}
 		}
-		values := model.MetadataValues{Description: item.Description, Icon: item.Icon, Tags: item.Tags, Vendor: strings.TrimSpace(item.VendorName), Endpoints: endpoints, NameRule: item.NameRule, Status: item.Status}
+		values := model.MetadataValues{Description: item.Description, Icon: item.Icon, Tags: item.Tags, Vendor: service.NormalizeMetadataVendor(item.VendorName), Endpoints: endpoints, NameRule: item.NameRule, Status: item.Status}
 		if err := model.ValidateMetadataValues(values); err != nil {
 			return source, nil, nil, fmt.Errorf("model %s: %w", item.ModelName, err)
 		}
@@ -306,12 +315,56 @@ func fetchMetadataCatalog(c *gin.Context, locale string) (metadataSyncSource, ma
 		}
 		models[item.ModelName] = values
 	}
-	encoded, err := common.Marshal([]any{source.Locale, models, vendors})
+	cfg, _, err := model.GetMetadataSources()
+	if err != nil {
+		return source, nil, nil, err
+	}
+	supplemental := service.SupplementalMetadata{Models: map[string]model.MetadataValues{}, Vendors: map[string]model.Vendor{}}
+	if cfg.ChannelFallback {
+		supplemental, err = fetchChannelMetadata(ctx)
+		if err != nil {
+			source.Warnings = append(source.Warnings, service.MetadataWarning{Message: "Channel metadata unavailable; primary catalog and saved aliases are still available."})
+			supplemental = service.SupplementalMetadata{Models: map[string]model.MetadataValues{}, Vendors: map[string]model.Vendor{}}
+		}
+	}
+	source.Warnings = append(source.Warnings, supplemental.Warnings...)
+	for name, vendor := range supplemental.Vendors {
+		if _, exists := vendors[name]; !exists {
+			vendors[name] = vendor
+		}
+	}
+	for _, alias := range cfg.Aliases {
+		alias.Vendor = service.NormalizeMetadataVendor(alias.Vendor)
+		if alias.Vendor != "" {
+			if _, exists := vendors[alias.Vendor]; !exists {
+				vendors[alias.Vendor] = model.Vendor{Name: alias.Vendor, Status: 1}
+			}
+		}
+	}
+	source.catalog = &metadataCatalog{Models: models, Vendors: vendors, Supplemental: supplemental, Config: cfg}
+	encoded, err := common.Marshal([]any{"metadata-v2", source.Locale, models, vendors, supplemental.Models, supplemental.Version, cfg})
 	if err != nil {
 		return source, nil, nil, err
 	}
 	source.Version = fmt.Sprintf("%x", sha256.Sum256(encoded))
 	return source, models, vendors, nil
+}
+
+// resolveMetadataModel reuses only recognized Claude reasoning aliases for
+// descriptive metadata. It never resolves price names, dates, or model versions.
+func resolveMetadataModel(catalog map[string]model.MetadataValues, name string) (model.MetadataValues, string, bool) {
+	if values, found := catalog[name]; found {
+		return values, name, true
+	}
+	base, _, alias, err := kitreasoning.ParseClaudeModelSuffix(name, true)
+	if err == nil && alias {
+		if values, found := catalog[base]; found {
+			// An inherited description must not broaden the local matching rule.
+			values.NameRule = model.NameRuleExact
+			return values, base, true
+		}
+	}
+	return model.MetadataValues{}, "", false
 }
 
 func SyncUpstreamPreview(c *gin.Context) {
@@ -343,6 +396,9 @@ func SyncUpstreamPreview(c *gin.Context) {
 	for name := range upstream {
 		allNames[name] = true
 	}
+	for name := range source.catalog.Supplemental.Models {
+		allNames[name] = true
+	}
 	names := make([]string, 0, len(allNames))
 	for name := range allNames {
 		names = append(names, name)
@@ -359,13 +415,19 @@ func SyncUpstreamPreview(c *gin.Context) {
 			candidate.Scope = "site"
 		}
 		local := locals[name]
-		up, found := upstream[name]
+		resolved, found := source.catalog.resolve(name)
+		up, metadataModel := resolved.Values, resolved.Model
+		candidate.MetadataOrigins = source.catalog.Supplemental.Origins[name]
+		candidate.MetadataConflicts = source.catalog.Supplemental.Conflicts[name]
 		if !found {
 			candidate.Kind = "missing_upstream"
 			candidates = append(candidates, candidate)
 			continue
 		}
 		candidate.Upstream = &up
+		candidate.MetadataModel = metadataModel
+		candidate.MetadataSource = resolved.Source
+		candidate.FillOnly = resolved.FillOnly
 		var localVendor *model.Vendor
 		if local != nil {
 			localVendor = vendorByID[local.VendorID]
@@ -397,7 +459,10 @@ func SyncUpstreamPreview(c *gin.Context) {
 		var localFields, upFields map[string]any
 		_ = common.Unmarshal(localRaw, &localFields)
 		_ = common.Unmarshal(upRaw, &upFields)
-		for _, field := range model.MetadataSyncFields {
+		for _, field := range metadataAvailableFields(resolved) {
+			if resolved.FillOnly && local != nil && localFields[field] != "" {
+				continue
+			}
 			if local == nil || localFields[field] != upFields[field] {
 				candidate.Fields = append(candidate.Fields, metadataSyncField{Field: field, Local: localFields[field], Upstream: upFields[field]})
 			}
@@ -420,7 +485,7 @@ func SyncUpstreamModels(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Preview and select metadata changes before applying"})
 		return
 	}
-	source, upstream, vendors, err := fetchMetadataCatalog(c, request.Locale)
+	source, _, vendors, err := fetchMetadataCatalog(c, request.Locale)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -431,12 +496,19 @@ func SyncUpstreamModels(c *gin.Context) {
 	}
 	updates := make([]model.MetadataSyncUpdate, 0, len(request.Selections))
 	for _, selection := range request.Selections {
-		values, exists := upstream[selection.ModelName]
+		resolved, exists := source.catalog.resolve(selection.ModelName)
+		values := resolved.Values
 		if !exists {
 			c.JSON(http.StatusConflict, gin.H{"success": false, "message": "Selected upstream model is no longer available"})
 			return
 		}
-		updates = append(updates, model.MetadataSyncUpdate{MetadataSyncSelection: selection, Values: values})
+		for _, field := range selection.Fields {
+			if !metadataFieldAvailable(resolved, field) {
+				c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Selected metadata field is unavailable from this source"})
+				return
+			}
+		}
+		updates = append(updates, model.MetadataSyncUpdate{MetadataSyncSelection: selection, Values: values, FillOnly: resolved.FillOnly})
 	}
 	result, err := model.ApplyMetadataSync(updates, vendors)
 	if err != nil {

@@ -25,6 +25,10 @@ type PricingPluginVariant struct {
 }
 
 type Pricing struct {
+	ChannelID              int                                  `json:"channel_id,omitempty"`
+	ChannelName            string                               `json:"channel_name,omitempty"`
+	ChannelEnabled         bool                                 `json:"channel_enabled"`
+	ChannelCost            *ChannelCostPublicPrice              `json:"channel_cost,omitempty"`
 	BillingPluginVariants  []PricingPluginVariant               `json:"billing_plugin_variants,omitempty"`
 	ModelName              string                               `json:"model_name"`
 	Description            string                               `json:"description,omitempty"`

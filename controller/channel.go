@@ -572,6 +572,9 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 	}
 
 	setting := channel.GetSetting()
+	if len(setting.SuperKey) > 8192 || strings.ContainsAny(setting.SuperKey, "\r\n") || setting.SuperKeyUserID < 0 {
+		return common.NewMessage("Invalid upstream account balance credentials")
+	}
 	if channel.Type != constant.ChannelTypeNewAPI && len(setting.TaskExtendPluginKeys) > 0 {
 		return fmt.Errorf("task_extend_plugin_keys is only supported on New API channels")
 	}
@@ -848,6 +851,7 @@ func AddChannel(c *gin.Context) {
 		createAudit["base_url_source"] = "plugin_default"
 	}
 	recordManageAudit(c, "channel.create", createAudit)
+	go service.RefreshChannelCosts()
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -1148,7 +1152,7 @@ func UpdateChannel(c *gin.Context) {
 	// Always copy the original ChannelInfo so that fields like IsMultiKey and MultiKeySize are retained.
 	channel.ChannelInfo = originChannel.ChannelInfo
 
-	// The super admin key never travels back through the management API, so an
+	// The upstream account key never travels back through the management API, so an
 	// edit that submits an empty value keeps the stored token.
 	if settingProvided {
 		setting := channel.GetSetting()
@@ -1257,6 +1261,7 @@ func UpdateChannel(c *gin.Context) {
 		return
 	}
 	model.InitChannelCache()
+	go service.RefreshChannelCosts()
 	if proxyChanged {
 		service.InvalidateProxyClient(originProxy)
 	}

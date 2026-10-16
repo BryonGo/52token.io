@@ -1,15 +1,18 @@
 package controller
 
 import (
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -267,5 +270,141 @@ func TestUpdateChannelNewAPILegacyBalanceReportsUpstreamRejection(t *testing.T) 
 
 	_, err := updateChannelBalance(channel)
 
-	require.ErrorContains(t, err, "invalid access token")
+	require.ErrorContains(t, err, "rejected the account balance credentials")
+}
+
+func TestAdvancedChannelAccountBalanceUsesItsOwnCredentialAndCNYCost(t *testing.T) {
+	setupSub2APIBalanceTest(t)
+	testChannelAccountBalanceIsolation(t)
+}
+
+func testChannelAccountBalanceIsolation(t *testing.T) {
+	t.Helper()
+	previousFX := operation_setting.USDExchangeRate
+	t.Cleanup(func() { operation_setting.USDExchangeRate = previousFX })
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/status" {
+			assert.Empty(t, r.Header.Get("Authorization"))
+			_, _ = w.Write([]byte(`{"success":true,"data":{"quota_per_unit":500000}}`))
+			return
+		}
+		require.Equal(t, "/api/user/self", r.URL.Path)
+		switch r.Header.Get("Authorization") {
+		case "Bearer account-one":
+			assert.Equal(t, "11", r.Header.Get("New-Api-User"))
+			_, _ = w.Write([]byte(`{"success":true,"data":{"quota":50000000}}`))
+		case "Bearer account-two":
+			assert.Equal(t, "22", r.Header.Get("New-Api-User"))
+			_, _ = w.Write([]byte(`{"success":true,"data":{"quota":10000000}}`))
+		default:
+			t.Error("unexpected credential; model key must not be used")
+		}
+	}))
+	defer server.Close()
+	for _, fx := range []float64{1, 7} {
+		operation_setting.USDExchangeRate = fx
+		for i := range 2 {
+			channel := &model.Channel{Type: constant.ChannelTypeAdvancedCustom, Name: fmt.Sprintf("account-%d-%g", i, fx), BaseURL: common.GetPointer(server.URL), Key: "model-call-key"}
+			channel.SetSetting(dto.ChannelSettings{SuperKey: []string{"account-one", "account-two"}[i], SuperKeyUserID: []int{11, 22}[i]})
+			channel.SetOtherSettings(dto.ChannelOtherSettings{CostBilling: &dto.ChannelCostSettings{Enabled: true, Source: "happyapi", CreditsPerCNY: 5, UpstreamGroup: "vip"}})
+			require.NoError(t, model.DB.Create(channel).Error)
+			result, err := updateChannelBalance(channel)
+			require.NoError(t, err)
+			assert.InDelta(t, []float64{20, 4}[i], result.Balance*fx, 1e-10, "CNY acquisition cost, independent account and display FX")
+			assert.Empty(t, result.RawResponse, "account profile fields must not be returned")
+			var saved model.Channel
+			require.NoError(t, model.DB.First(&saved, channel.Id).Error)
+			assert.InDelta(t, result.Balance, saved.Balance, 1e-10)
+			assert.Positive(t, saved.BalanceUpdatedTime)
+			assert.Equal(t, "model-call-key", saved.Key)
+			assert.Equal(t, channel.GetSetting().SuperKey, saved.GetSetting().SuperKey)
+			clearChannelInfo(&saved)
+			assert.Empty(t, saved.GetSetting().SuperKey, "management responses never disclose account credentials")
+		}
+	}
+}
+
+func TestChannelAccountBalanceRejectsInvalidResponsesWithoutOverwritingBalance(t *testing.T) {
+	for _, tc := range []struct {
+		name, self, status, wantErr string
+		want                        float64
+	}{
+		{name: "missing quota", self: `{"success":true,"data":{}}`, wantErr: "balance is missing"},
+		{name: "rejected account", self: `{"success":false,"message":"secret-fixture private-profile"}`, wantErr: "rejected the account"},
+		{name: "invalid quota unit", self: `{"success":true,"data":{"quota":100}}`, status: `{"success":true,"data":{"quota_per_unit":0}}`, wantErr: "quota unit"},
+		{name: "oversized response", self: strings.Repeat("x", maxAdvancedCustomBalanceResponseBytes+1), wantErr: "Invalid upstream account"},
+		{name: "explicit zero balance", self: `{"success":true,"data":{"quota":0}}`, status: `{"success":true,"data":{"quota_per_unit":500000}}`, want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupSub2APIBalanceTest(t)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/status" {
+					_, _ = w.Write([]byte(tc.status))
+					return
+				}
+				_, _ = w.Write([]byte(tc.self))
+			}))
+			defer server.Close()
+			channel := &model.Channel{Type: constant.ChannelTypeAdvancedCustom, BaseURL: common.GetPointer(server.URL), Balance: 42}
+			channel.SetSetting(dto.ChannelSettings{SuperKey: "secret-fixture"})
+			require.NoError(t, model.DB.Create(channel).Error)
+			result, err := updateChannelBalance(channel)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				assert.NotContains(t, err.Error(), "secret-fixture")
+				assert.NotContains(t, err.Error(), "private-profile")
+				var saved model.Channel
+				require.NoError(t, model.DB.First(&saved, channel.Id).Error)
+				assert.Equal(t, 42.0, saved.Balance)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, result.Balance)
+		})
+	}
+}
+
+func TestChannelAccountBalanceDoesNotForwardCredentialsToRedirectsOrInsecureHosts(t *testing.T) {
+	destinationCalls := 0
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { destinationCalls++ }))
+	defer destination.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, destination.URL, http.StatusFound) }))
+	defer redirect.Close()
+	for _, tc := range []struct {
+		name, url string
+		insecure  bool
+		userID    int
+		key, want string
+	}{
+		{name: "redirect", url: redirect.URL, key: "secret-fixture", want: "HTTP"},
+		{name: "remote HTTP", url: "http://upstream.invalid", key: "secret-fixture", want: "HTTPS"},
+		{name: "skip certificate verification", url: redirect.URL, insecure: true, key: "secret-fixture", want: "certificate verification"},
+		{name: "invalid user ID", url: redirect.URL, userID: -1, key: "secret-fixture", want: "Invalid upstream account balance credentials"},
+		{name: "invalid token header", url: redirect.URL, key: "secret-fixture\r\ninjected:value", want: "Invalid upstream account balance credentials"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			channel := &model.Channel{Type: constant.ChannelTypeAdvancedCustom, BaseURL: common.GetPointer(tc.url)}
+			channel.SetSetting(dto.ChannelSettings{SuperKey: tc.key, SuperKeyUserID: tc.userID, TLSInsecureSkipVerify: tc.insecure})
+			_, err := updateChannelBalance(channel)
+			require.ErrorContains(t, err, tc.want)
+			assert.NotContains(t, err.Error(), "secret-fixture")
+		})
+	}
+	assert.Zero(t, destinationCalls)
+}
+
+func TestChannelAccountBalanceSettingsRequireSensitiveWrite(t *testing.T) {
+	origin := &model.Channel{Type: constant.ChannelTypeAdvancedCustom}
+	updated := PatchChannel{Channel: *origin}
+	updated.SetSetting(dto.ChannelSettings{SuperKey: "account-fixture", SuperKeyUserID: 42})
+	assert.True(t, channelHasSensitiveChanges(&updated, origin, map[string]any{"setting": *updated.Setting}))
+	for _, setting := range []dto.ChannelSettings{
+		{SuperKey: strings.Repeat("a", 8193)},
+		{SuperKey: "account-fixture\r\nheader:value"},
+		{SuperKeyUserID: -1},
+	} {
+		channel := &model.Channel{Type: constant.ChannelTypeNewAPILegacy}
+		channel.SetSetting(setting)
+		require.ErrorContains(t, validateChannel(channel, false), "Invalid upstream account balance credentials")
+	}
 }

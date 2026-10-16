@@ -226,6 +226,16 @@ func TryTieredSettle(relayInfo *relaycommon.RelayInfo, params billingexpr.TokenP
 		}
 		return true, quota, nil
 	}
+	if relayInfo.PriceData.ChannelCost != nil {
+		// Procurement billing may subsidize a fractional quota unit, but must
+		// never round it upward above the computed cost. Ordinary pricing keeps
+		// the expression engine's existing rounding policy.
+		var clamp *common.QuotaClamp
+		tr.ActualQuotaAfterGroup, clamp = common.QuotaFromFloatChecked(tr.ActualQuotaBeforeGroup * snap.GroupRatio)
+		if clamp != nil {
+			tr.Clamp = clamp
+		}
+	}
 
 	// Surface any single-request saturation from settlement onto RelayInfo so the
 	// consume log records it under admin_info, regardless of which caller

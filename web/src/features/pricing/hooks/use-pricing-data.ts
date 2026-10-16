@@ -30,7 +30,8 @@ export function usePricingData(enabled = true) {
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['pricing'],
     queryFn: async () => requireServerSuccess(await getPricing()),
-    staleTime: 5 * 60 * 1000,
+    staleTime: 30 * 1000,
+    refetchInterval: 60 * 1000,
     enabled,
   })
 
@@ -55,7 +56,9 @@ export function usePricingData(enabled = true) {
         : undefined
       return {
         ...model,
-        key: model.model_name,
+        key: model.channel_id
+          ? `${model.channel_id}:${model.model_name}`
+          : model.model_name,
         vendor_name: vendor?.name,
         vendor_icon: vendor?.icon,
         vendor_description: vendor?.description,

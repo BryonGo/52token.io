@@ -1,4 +1,6 @@
 {
+  "channel cache refresh failed; keeping previous snapshot: %s": "渠道缓存刷新失败，保留上次可用数据：%s",
+  "channel cost sync failed: channel=%d error=%s": "渠道成本价格同步失败：渠道=%d，错误=%s",
   "%d quota points": "%d 点额度",
   "%s after refresh: %s": "%s（刷新凭证后重试）: %s",
   "%s failed: %s": "%s 构建失败，%s",

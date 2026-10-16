@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { formatBillingCurrencyFromUSD } from '@/lib/currency'
+import { formatBillingCurrencyFromUSD, formatCNYAmount } from '@/lib/currency'
 
 import { TOKEN_UNIT_DIVISORS } from '../constants'
 import type {
@@ -47,6 +47,7 @@ import { getTaskPricingDisplayTiers } from './task-matrix-display'
 
 export type DynamicPriceOptions = {
   tokenUnit: TokenUnit
+  cnyCost?: boolean
   showCurrencySymbol?: boolean
   showRechargePrice?: boolean
   priceRate?: number
@@ -142,6 +143,7 @@ function isTaskPricingTier(tier: DynamicPricingTier): tier is ParsedTaskTier {
 }
 
 export function isDynamicPricingModel(model: PricingModel): boolean {
+  if (model.channel_cost) return Boolean(model.channel_cost.expression)
   if (model.billing_plugin_variants?.length) {
     return model.billing_plugin_variants.some(
       (variant) =>
@@ -202,6 +204,17 @@ export function formatDynamicUnitPrice(
   valuePerMillionTokens: number,
   options: DynamicPriceOptions
 ): string {
+  if (options.cnyCost) {
+    return formatCNYAmount(
+      valuePerMillionTokens / TOKEN_UNIT_DIVISORS[options.tokenUnit],
+      {
+        showSymbol: options.showCurrencySymbol ?? true,
+        digitsLarge: 4,
+        digitsSmall: 8,
+        abbreviate: false,
+      }
+    )
+  }
   const groupRatio = options.groupRatioMultiplier ?? 1
   const priceRate = options.priceRate ?? 1
   const usdExchangeRate = options.usdExchangeRate ?? 1
@@ -227,6 +240,13 @@ export function formatTaskUsageUnitPrice(
   valuePerUnit: number,
   options: DynamicPriceOptions
 ): string {
+  if (options.cnyCost)
+    {return formatCNYAmount(valuePerUnit, {
+      showSymbol: options.showCurrencySymbol ?? true,
+      digitsLarge: 4,
+      digitsSmall: 8,
+      abbreviate: false,
+    })}
   const groupRatio = options.groupRatioMultiplier ?? 1
   const priceRate = options.priceRate ?? 1
   const usdExchangeRate = options.usdExchangeRate ?? 1
@@ -387,6 +407,61 @@ export function getDynamicPricingSummary(
   model: PricingModel,
   options: DynamicPriceOptions
 ): DynamicPricingSummary | null {
+  if (model.channel_cost?.expression) {
+    const summary = getDynamicPricingSummary(
+      {
+        ...model,
+        channel_cost: undefined,
+        billing_mode: 'tiered_expr',
+        billing_expr: model.channel_cost.expression,
+      },
+      {
+        ...options,
+        cnyCost: true,
+        showRechargePrice: false,
+        groupRatioMultiplier: 1,
+      }
+    )
+    const costTiers = model.channel_cost.tiers
+    if (!summary || !costTiers?.length) return summary
+    const keys: Record<
+      string,
+      'input' | 'output' | 'cache_read' | 'cache_write' | 'cache_write_1h'
+    > = {
+      inputPrice: 'input',
+      outputPrice: 'output',
+      cacheReadPrice: 'cache_read',
+      cacheWritePrice: 'cache_write',
+      cacheWrite1hPrice: 'cache_write_1h',
+    }
+    const entries = summary.entries.map((entry) => {
+      const key = keys[entry.field]
+      if (!key) return entry
+      const prices = costTiers.map((tier) => tier.rates[key])
+      const min = Math.min(...prices),
+        max = Math.max(...prices)
+      return {
+        ...entry,
+        minValue: min,
+        maxValue: max,
+        formattedRange:
+          min === max
+            ? undefined
+            : `${formatDynamicUnitPrice(min, { ...options, cnyCost: true })} – ${formatDynamicUnitPrice(max, { ...options, cnyCost: true })}`,
+      }
+    })
+    const byKey = new Map(entries.map((entry) => [entry.key, entry]))
+    return {
+      ...summary,
+      entries,
+      primaryEntries: summary.primaryEntries.map(
+        (entry) => byKey.get(entry.key) ?? entry
+      ),
+      secondaryEntries: summary.secondaryEntries.map(
+        (entry) => byKey.get(entry.key) ?? entry
+      ),
+    }
+  }
   const variants = model.billing_plugin_variants
   if (variants?.length) {
     const summaries = variants.flatMap((variant) => {

@@ -107,7 +107,13 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
     [props.model, dynamicPriceOptions, currency]
   )
   let priceSummary: ReactNode
-  if (dynamicSummary) {
+  if (props.model.channel_cost?.error) {
+    priceSummary = (
+      <span className='text-destructive col-span-full text-xs'>
+        {t(props.model.channel_cost.error)}
+      </span>
+    )
+  } else if (dynamicSummary) {
     const cacheReadEntries = dynamicSummary.secondaryEntries.filter(
       (entry) => entry.field === 'cacheReadPrice' && entry.unit === 'token'
     )
@@ -285,6 +291,14 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
           >
             {props.model.model_name}
           </h3>
+          {props.model.channel_name && (
+            <p className='mt-1 text-xs break-all'>
+              {t('Channel')}: {props.model.channel_name}
+              {props.model.channel_enabled === false
+                ? ` · ${t('Disabled')}`
+                : ''}
+            </p>
+          )}
           {props.model.vendor_name && (
             <p
               className='text-muted-foreground mt-1 truncate text-xs'
@@ -401,7 +415,9 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
           <Button
             variant='ghost'
             size='sm'
-            onClick={() => props.onClick(props.model.model_name || '')}
+            onClick={() =>
+              props.onClick(props.model.key ?? props.model.model_name ?? '')
+            }
           >
             {t('Details')}
             <ChevronRight aria-hidden className='size-3.5' />

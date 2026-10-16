@@ -635,3 +635,17 @@ export function formatLocalCurrencyAmount(
 
   return formatCurrencyValue(amount, merged, meta)
 }
+
+/** Format an amount already denominated in CNY, independent of display FX. */
+export function formatCNYAmount(
+  amount: number | null | undefined,
+  options?: CurrencyFormatOptions
+): string {
+  if (amount == null || !Number.isFinite(amount)) return '-'
+  return formatCurrencyValue(amount, mergeOptions(options), {
+    kind: 'currency',
+    symbol: '¥',
+    currencyCode: 'CNY',
+    exchangeRate: 1,
+  })
+}

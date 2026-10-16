@@ -152,6 +152,64 @@ describe('metadata sync preview', () => {
     client.clear()
   })
 
+  it('identifies inherited descriptions and distinguishes missing metadata from channel pricing', async () => {
+    const inherited: MetadataSyncCandidate = {
+      model_name: 'claude-opus-4-7-high',
+      metadata_model: 'claude-opus-4-7',
+      scope: 'site',
+      kind: 'create',
+      record_version: 'alias-v1',
+      fields: [
+        { field: 'description', local: '', upstream: 'Base description' },
+      ],
+    }
+    vi.spyOn(api, 'get').mockResolvedValue({
+      data: {
+        success: true,
+        data: {
+          ...preview,
+          candidates: [
+            inherited,
+            {
+              model_name: 'grok-4-0709',
+              scope: 'site',
+              kind: 'missing_upstream',
+              record_version: '',
+              fields: [],
+            },
+          ],
+        },
+      },
+    })
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+    render(
+      <QueryClientProvider client={client}>
+        <SyncWizardDialog open onOpenChange={() => {}} />
+      </QueryClientProvider>
+    )
+    await userEvent
+      .setup()
+      .click(screen.getByRole('button', { name: 'Load metadata preview' }))
+    expect(
+      await screen.findByText('Metadata from claude-opus-4-7')
+    ).toBeVisible()
+    expect(screen.getByText('Not found in metadata catalog')).toBeVisible()
+    expect(
+      screen.getByText(
+        'Model metadata is read from bound channels, then normalized. Supplementation preserves existing nonempty fields.'
+      )
+    ).toBeVisible()
+    expect(
+      screen.getByRole('checkbox', { name: 'Select claude-opus-4-7-high' })
+    ).toBeEnabled()
+    expect(
+      screen.queryByRole('checkbox', { name: 'Select grok-4-0709' })
+    ).not.toBeInTheDocument()
+    client.clear()
+  })
+
   it('prioritizes syncable models and selects only eligible records across all pages', async () => {
     const syncable: MetadataSyncCandidate[] = Array.from(
       { length: 21 },
@@ -223,7 +281,7 @@ describe('metadata sync preview', () => {
     expect(pageSelection).toBePartiallyChecked()
     await user.click(screen.getByRole('button', { name: 'Next' }))
     expect(screen.getByText('z-sync-21')).toBeVisible()
-    expect(screen.getByText('Not found upstream')).toBeVisible()
+    expect(screen.getByText('Not found in metadata catalog')).toBeVisible()
     for (const item of skipped) {
       expect(
         screen.queryByRole('checkbox', { name: `Select ${item.model_name}` })

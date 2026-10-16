@@ -275,7 +275,7 @@ export const channelFormSchema = z
     responses_websocket_enabled: z.boolean().optional(),
     system_prompt: z.string().optional(),
     system_prompt_override: z.boolean().optional(),
-    super_key: z.string().optional(),
+    super_key: z.string().max(8192).optional(),
     super_key_user_id: z.number().int().nonnegative().optional(),
     // Type-specific settings (stored in settings JSON)
     is_enterprise_account: z.boolean().optional(), // OpenRouter specific
@@ -299,6 +299,28 @@ export const channelFormSchema = z
     upstream_model_update_ignored_models: z.string().optional(),
   })
   .superRefine((data, ctx) => {
+    try {
+      const config = JSON.parse(data.settings || '{}').cost_billing
+      if (
+        config?.enabled &&
+        (!/^[a-z][a-z0-9_-]{0,63}$/.test(config.source ?? '') ||
+          !Number.isFinite(config.credits_per_cny) ||
+          config.credits_per_cny < 0.000001 ||
+          config.credits_per_cny > 1000000 ||
+          (config.source === 'happyapi' &&
+            (!config.upstream_group?.trim() ||
+              config.upstream_group === 'auto')))
+      ) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['settings'],
+          message: 'Invalid channel cost configuration',
+        })
+      }
+    } catch {
+      /* JSON validation above supplies the field error. */
+    }
+
     if (
       [
         3,
@@ -542,7 +564,7 @@ export function transformChannelToFormDefaults(
           parsed.responses_websocket_enabled === true,
         system_prompt: parsed.system_prompt || '',
         system_prompt_override: parsed.system_prompt_override || false,
-        super_key: parsed.super_key || '',
+        super_key: '', // Account credentials are write-only; never rehydrate a secret.
         super_key_user_id:
           typeof parsed.super_key_user_id === 'number'
             ? parsed.super_key_user_id

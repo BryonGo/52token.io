@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert"
@@ -23,6 +24,7 @@ type ResponsesUsageAccumulator struct {
 	imageCommitted bool
 	started        bool
 	finished       bool
+	cacheOnlyCost  bool
 }
 
 func NewResponsesUsageAccumulator(info *relaycommon.RelayInfo) *ResponsesUsageAccumulator {
@@ -43,7 +45,9 @@ func (a *ResponsesUsageAccumulator) Observe(event *dto.ResponsesStreamResponse, 
 	switch event.Type {
 	case "response.completed", "response.done", "response.failed", "response.incomplete", "response.cancelled", "response.canceled":
 		if event.Response != nil {
-			ApplyResponsesUsage(a.usage, event.Response.Usage)
+			normalized := NormalizeResponsesCostUsage(a.info, event.Response.Usage)
+			a.cacheOnlyCost = normalized != event.Response.Usage
+			ApplyResponsesUsage(a.usage, normalized)
 			if a.outputText.Len() == 0 {
 				// Some upstreams carry the output only on the terminal event.
 				a.outputText.WriteString(relayconvert.ExtractOutputTextFromResponses(event.Response))
@@ -96,7 +100,7 @@ func (a *ResponsesUsageAccumulator) Finish() *dto.Usage {
 		a.imageCounter.Commit(a.info)
 		a.imageCommitted = true
 	}
-	if a.usage.CompletionTokens == 0 {
+	if a.usage.CompletionTokens == 0 && !a.cacheOnlyCost {
 		if output := a.outputText.String(); output != "" {
 			a.usage.CompletionTokens = tokenkit.Count(a.info.GetUpstreamModelName(), output)
 		}
@@ -113,6 +117,21 @@ func (a *ResponsesUsageAccumulator) Finish() *dto.Usage {
 		a.usage.BillingUsage = dto.CloneBillingUsageWithEstimatedCompletion(a.usage.BillingUsage, a.usage.CompletionTokens)
 	}
 	return a.usage
+}
+
+// NormalizeResponsesCostUsage preserves Sub2API's cache-only procurement debit.
+// Its zero token totals must not trigger estimated output charges above that debit.
+// Other channel types and ordinary pricing keep their existing usage handling.
+func NormalizeResponsesCostUsage(info *relaycommon.RelayInfo, usage *dto.Usage) *dto.Usage {
+	if info.GetChannelType() != constant.ChannelTypeSub2API || info.PriceData.ChannelCost == nil ||
+		usage == nil || usage.InputTokens != 0 || usage.OutputTokens != 0 || usage.TotalTokens != 0 ||
+		usage.InputTokensDetails == nil || usage.InputTokensDetails.CachedTokens <= 0 {
+		return usage
+	}
+	copy := *usage
+	copy.InputTokens = usage.InputTokensDetails.CachedTokens
+	copy.TotalTokens = copy.InputTokens
+	return &copy
 }
 
 // ObserveResponsesOutcome records the protocol outcome of one Responses event

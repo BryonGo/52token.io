@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/pkg/channelcost"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 
@@ -1006,6 +1007,14 @@ func (channel *Channel) ValidateSettings() error {
 	if channel.OtherSettings != "" {
 		err := common.UnmarshalJsonStr(channel.OtherSettings, channelOtherSettings)
 		if err != nil {
+			return err
+		}
+	}
+	if err := channelcost.Validate(channelOtherSettings.CostBilling); err != nil {
+		return err
+	}
+	if cfg := channelOtherSettings.CostBilling; cfg != nil && cfg.Enabled {
+		if _, err := GetChannelPriceSource(cfg.Source); err != nil {
 			return err
 		}
 	}

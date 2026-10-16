@@ -63,6 +63,11 @@ export function usePricingColumns(
             {modelIcon}
             <span className='truncate font-mono text-sm font-medium'>
               {model.model_name}
+              {model.channel_name && (
+                <span className='text-muted-foreground block font-sans text-xs'>
+                  {t('Channel')}: {model.channel_name}
+                </span>
+              )}
             </span>
           </div>
         )

@@ -279,6 +279,9 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		if streamResp.Response != nil {
 			info.ObserveResponseModel(streamResp.Response.Model)
 		}
+		if streamResp.Type == "response.completed" && streamResp.Response != nil {
+			streamResp.Response.Usage = service.NormalizeResponsesCostUsage(info, streamResp.Response.Usage)
+		}
 		if streamResp.Type == "response.error" || streamResp.Type == "response.failed" {
 			upstreamFailed = true
 			if streamResp.Response != nil {

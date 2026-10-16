@@ -9,6 +9,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/pkg/channelcost"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert"
@@ -88,6 +89,73 @@ func TestOaiResponsesToChatStreamHandlerConvertsSSEOrderAndUsage(t *testing.T) {
 		`"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5`,
 		`data: [DONE]`,
 	)
+}
+
+func TestOaiResponsesToChatStreamHandlerPreservesSub2APICacheOnlyCost(t *testing.T) {
+	oldMode := gin.Mode()
+	gin.SetMode(gin.TestMode)
+	t.Cleanup(func() { gin.SetMode(oldMode) })
+	oldTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
+
+	for _, tc := range []struct {
+		name        string
+		channelType int
+		costBilling bool
+		cacheOnly   bool
+		native      bool
+	}{
+		{"Sub2API procurement cost", constant.ChannelTypeSub2API, true, true, false},
+		{"native Responses procurement cost", constant.ChannelTypeSub2API, true, true, true},
+		{"ordinary Sub2API pricing unchanged", constant.ChannelTypeSub2API, false, false, false},
+		{"other channel cost unchanged", constant.ChannelTypeOpenAI, true, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := strings.Join([]string{
+				`data: {"type":"response.created","response":{"id":"resp_cache","model":"deepseek-v4-pro"}}`,
+				`data: {"type":"response.reasoning_summary_text.delta","delta":"reasoning generated upstream"}`,
+				`data: {"type":"response.output_text.delta","delta":"OK"}`,
+				`data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"cached_tokens":1697}}}}`,
+				`data: [DONE]`,
+				``,
+			}, "\n")
+			c, recorder, resp, info := newResponsesChatTestContext(t, body, true)
+			info.ChannelType = tc.channelType
+			if tc.costBilling {
+				info.PriceData.ChannelCost = &channelcost.Receipt{}
+			}
+
+			var usage *dto.Usage
+			var err *types.NewAPIError
+			if tc.native {
+				info.RelayFormat = types.RelayFormatOpenAIResponses
+				usage, err = OaiResponsesStreamHandler(c, info, resp)
+			} else {
+				usage, err = OaiResponsesToChatStreamHandler(c, info, resp)
+			}
+			require.Nil(t, err)
+			require.NotNil(t, usage)
+			assert.Contains(t, recorder.Body.String(), `OK`)
+			if !tc.native {
+				assert.Contains(t, recorder.Body.String(), `data: [DONE]`)
+			}
+			if tc.cacheOnly {
+				assert.Equal(t, 1697, usage.PromptTokens)
+				assert.Equal(t, 1697, usage.TotalTokens)
+				assert.Zero(t, usage.CompletionTokens)
+				assert.Equal(t, 1697, usage.PromptTokensDetails.CachedTokens)
+				if !tc.native {
+					require.NotNil(t, usage.BillingUsage)
+					require.NotNil(t, usage.BillingUsage.OpenAIUsage)
+					assert.Equal(t, 1697, usage.BillingUsage.OpenAIUsage.InputTokens)
+					assert.Zero(t, usage.BillingUsage.OpenAIUsage.OutputTokens)
+				}
+			} else {
+				assert.Positive(t, usage.CompletionTokens, "existing output estimation remains in place")
+			}
+		})
+	}
 }
 
 func TestOaiResponsesToChatStreamHandlerConvertsClaudeSSETerminalsAndUsage(t *testing.T) {

@@ -618,6 +618,11 @@ function ModelHeader(props: { model: PricingModel }) {
         />
       </div>
       <div className='mt-1 flex flex-wrap items-center gap-1.5 text-xs'>
+        {model.channel_name && (
+          <span>
+            {t('Channel')}: {model.channel_name}
+          </span>
+        )}
         {model.vendor_name && (
           <span className='text-muted-foreground'>{model.vendor_name}</span>
         )}
@@ -656,6 +661,7 @@ function PriceSection(props: {
       getDynamicPricingSummary(props.model, {
         now: billingTime === undefined ? undefined : new Date(billingTime),
         tokenUnit: props.tokenUnit,
+        cnyCost: Boolean(props.model.channel_cost),
         showRechargePrice: props.showRechargePrice,
         priceRate: props.priceRate,
         usdExchangeRate: props.usdExchangeRate,
@@ -1159,6 +1165,7 @@ function ProviderGroupPricingSection(
     )
     const priceFields = getDynamicPriceFields(dynamicTiers, {
       tokenUnit: props.tokenUnit,
+      cnyCost: Boolean(props.model.channel_cost),
       showRechargePrice,
       priceRate: props.priceRate,
       usdExchangeRate: props.usdExchangeRate,
@@ -1167,11 +1174,16 @@ function ProviderGroupPricingSection(
     })
     const formattedPricesByGroup = new Map(
       availableGroups.map((group) => {
-        const ratio = props.groupRatio[group] || 1
+        const ratio =
+          props.model.channel_cost &&
+          !props.model.channel_cost.local_group_billing
+            ? 1
+            : props.groupRatio[group] || 1
         return [
           group,
           getDynamicFormattedPricesByTier(dynamicTiers, {
             tokenUnit: props.tokenUnit,
+            cnyCost: Boolean(props.model.channel_cost),
             showRechargePrice,
             priceRate: props.priceRate,
             usdExchangeRate: props.usdExchangeRate,
@@ -1190,7 +1202,11 @@ function ProviderGroupPricingSection(
         <AutoGroupChain model={props.model} autoGroups={props.autoGroups} />
         <div className='space-y-3'>
           {availableGroups.map((group) => {
-            const ratio = props.groupRatio[group] || 1
+            const ratio =
+              props.model.channel_cost &&
+              !props.model.channel_cost.local_group_billing
+                ? 1
+                : props.groupRatio[group] || 1
             const formattedPricesByTier =
               formattedPricesByGroup.get(group) ??
               new Map<DynamicPricingTier, Map<string, string>>()
@@ -1312,6 +1328,7 @@ function ProviderGroupPricingSection(
                           cell: (row) =>
                             `≈ ${formatTaskUsageUnitPrice(row.total, {
                               tokenUnit: props.tokenUnit,
+                              cnyCost: Boolean(props.model.channel_cost),
                               showRechargePrice,
                               priceRate: props.priceRate,
                               usdExchangeRate: props.usdExchangeRate,
@@ -1396,7 +1413,8 @@ function ProviderGroupPricingSection(
             header: t('Ratio'),
             className: thClass,
             cellClassName: 'text-muted-foreground py-2.5 font-mono',
-            cell: (group) => `${props.groupRatio[group] || 1}x`,
+            cell: (group) =>
+              `${props.model.channel_cost && !props.model.channel_cost.local_group_billing ? 1 : props.groupRatio[group] || 1}x`,
           },
           ...(isTokenBased
             ? [
@@ -1617,7 +1635,11 @@ export function ModelDetails() {
 
   const model = useMemo(() => {
     if (!models || !modelId) return null
-    return models.find((m) => m.model_name === modelId) || null
+    return (
+      models.find((m) => (m.key ?? m.model_name) === modelId) ||
+      models.find((m) => m.model_name === modelId) ||
+      null
+    )
   }, [models, modelId])
 
   const handleBack = () => {

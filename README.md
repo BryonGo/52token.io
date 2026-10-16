@@ -359,3 +359,92 @@ If this project is helpful to you, welcome to give us a ⭐️ Star！
 <sub>Built with ❤️ by QuantumNous</sub>
 
 </div>
+
+### Channel CNY cost billing (development)
+
+Model metadata is read from each model's bound channel source before names are
+normalized; a model on another channel never borrows that source implicitly.
+The same source editor also accepts description, vendor, icon, tags, endpoint,
+and vendor-list field mappings. New API responses use their own vendor ID list;
+for example `x.ai` and `XAI` normalize to `xAI`. Conflicting nonempty fields from
+different channels are excluded from automatic supplementation and shown with
+the contributing channel names in the metadata preview. HTML-only price sources
+without descriptive fields continue using the shared metadata catalog or aliases.
+
+In Models → Sync model metadata → Metadata sources and aliases, maintain exact
+or prefix aliases and normalized vendors (for example `grok-` → `xAI`). These
+rules supply missing descriptive metadata only, preserving existing nonempty
+fields and model-square visibility. They never edit channel model mappings,
+channel routing, or per-channel price names. Preview and apply support bulk
+selection; unavailable fields are not written as empty values.
+
+Maintain price sources in Billing → Model pricing → Price sources. The built-in
+DeepSeek official and HappyAPI sources are editable templates. Add a JSON GET
+source with its pricing URL, bound channel origin, dot-path field mappings and
+price unit (1, 1000 or 1000000 tokens). Optional output/cache multiplier switches
+support ratio-style APIs. New API templates can read quota units from a status
+endpoint and per-token-group multipliers from the price response. Use Test field
+mappings before binding a source ID in a channel's CNY cost settings. Preview is
+read-only and shows upstream units per million tokens, before purchase conversion.
+Sources can be disabled; saved edits use version checks and invalidate existing
+snapshots on bound channels. New source definitions use existing options storage,
+with no database schema change. Requests use the existing protected fetch client,
+follow the configured SSRF policy, and do not follow redirects. These configurable
+sources currently support public GET JSON endpoints; authenticated/private API
+contracts and arbitrary HTML field mappings are outside this adapter.
+
+New API token expressions support increasing `len < / <=` context thresholds
+and non-negative linear `p`, `c`, `cr`, `cc`, `cc1h` coefficients. All tiers are
+converted to CNY and retained for reservation/settlement. Legacy per-request prices (`quota_type=1` / mapped request price) and flat
+`fixed(amount)` expressions are automatically normalized to
+`tier("request", fixed(CNY_amount))` after purchase/group conversion, with no model
+name allowlist. Zero prices remain explicit zero. Request prices are reserved and
+settled through the same expression engine, once per successful HTTP/SSE request,
+independent of token usage and stream chunk count. Unknown expression
+shapes are reported per model; legacy ratio fields never
+replace a model's active expression. HappyAPI's gpt-5.6-terra-xhigh is one such
+context-priced model (272000-token threshold).
+`credits_per_cny` means upstream balance units received for one yuan: official CNY
+accounts use `1`; paying CNY 0.2 for one HappyAPI credit means `5`. Costs are
+`upstream price × upstream token-group multiplier / credits_per_cny`, with the
+local billing group multiplier fixed at one for ordinary cost channels. Confirmed
+reference sources can instead retain the base CNY price and apply the actual
+fractional multiplier once through a dedicated local group (POJIA uses `0.08`).
+Never apply that multiplier in both the channel price and the local group.
+HappyAPI's dollar symbol is treated
+as a credit denomination, not foreign exchange. Configure its actual token group;
+automatic groups and account-specific discounts are outside this adapter's contract.
+
+Prices are isolated by channel ID and requested model, including model mappings.
+They refresh on save/startup and hourly, and are frozen per routed attempt for
+reservation, settlement, and audit logs. Unknown, changed, unsupported, or more
+than 24-hour-old prices block cost-billed requests. Parameter overrides, paid
+built-in tools and non-default service tiers are not supported. Token and fixed
+request prices use their respective synchronized billing expressions.
+The admin Model pricing page exposes source prices, conversions and sync status.
+Model management's Sync pricing entry uses the same channel-scoped synchronizer:
+selecting a channel updates only that channel's configured models, never global
+model-name price options. Shared reference presets are not channel cost sources.
+Advanced custom route targets must match the configured provider; changing those
+routes invalidates the price snapshot and requires synchronization again.
+
+Wallet recharge conversion and display conversion must agree. For a CNY wallet,
+set both `Price` and `USDExchangeRate` to `1`, and display currency to `CNY`.
+Changing these settings changes how existing balances are valued: review balances
+before applying outside an isolated development database. Cost billing rounds
+down at the existing quota precision so fractional dust cannot exceed the purchase
+cost; ordinary billing retains its existing rounding. Do not multiply the channel's already-converted
+CNY prices by display FX again.
+
+DeepSeek peak hours use Beijing time and the verified 2026 Chinese holiday
+calendar; update the calendar before 2027 (unknown calendar years fail closed).
+The provider's Chinese pricing page is the source of both peak and off-peak rates.
+
+POJIA's confirmed DeepSeek reference uses the verified off-peak CNY baseline;
+its peak schedule remains unverified. Chat requests for that channel can use the
+scoped Chat-to-Responses compatibility policy. For Sub2API cost-billed Responses
+streams that report only a cache debit with zero token totals, preserve that
+reported debit instead of estimating output charges above the upstream bill.
+
+For new channels, groups and model intake, follow
+[the channel/model onboarding rules](docs/channel-model-onboarding.zh-CN.md).

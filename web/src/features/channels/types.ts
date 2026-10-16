@@ -92,9 +92,9 @@ export interface ChannelSettings {
   http_protocol?: 'auto' | 'http1' | string
   http2_connection_shards?: number
   tls_insecure_skip_verify?: boolean
-  /** Account-level access token of a legacy New API gateway (balance queries only). */
+  /** Upstream account access token for balance queries, separate from the model API key. */
   super_key?: string
-  /** Upstream user id that owns the super admin key, when the station needs it. */
+  /** Upstream account user ID, when required by the balance endpoint. */
   super_key_user_id?: number
 }
 

@@ -49,6 +49,7 @@ import type {
   MetadataSyncSelection,
   SyncLocale,
 } from '../../types'
+import { MetadataSourcesDialog } from './metadata-sources-dialog'
 
 const FIELD_LABELS: Record<MetadataSyncField, string> = {
   description: 'Description',
@@ -64,7 +65,7 @@ const REASON_LABELS = {
   update: 'Metadata changes',
   unchanged: 'No changes',
   blocked: 'Metadata sync disabled',
-  missing_upstream: 'Not found upstream',
+  missing_upstream: 'Not found in metadata catalog',
   missing_vendor: 'Upstream vendor missing',
 }
 const STEPS = [
@@ -85,6 +86,7 @@ export function SyncWizardDialog(props: {
 }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
+  const [sourcesOpen, setSourcesOpen] = useState(false)
   const [locale, setLocale] = useState<SyncLocale>('zh')
   const [preview, setPreview] = useState<MetadataSyncPreview | null>(null)
   const [scope, setScope] = useState('site')
@@ -435,7 +437,33 @@ export function SyncWizardDialog(props: {
             >
               {t('Load metadata preview')}
             </Button>
+            <Button
+              variant='outline'
+              disabled={busy}
+              onClick={() => setSourcesOpen(true)}
+            >
+              {t('Metadata sources and aliases')}
+            </Button>
+            {sourcesOpen && (
+              <MetadataSourcesDialog
+                onClose={() => setSourcesOpen(false)}
+                onSaved={() => {
+                  setPreview(null)
+                  setSelection({})
+                  load.reset()
+                }}
+              />
+            )}
           </div>
+          {preview?.source.warnings?.map((warning) => (
+            <p
+              role='alert'
+              key={warning.message + warning.name}
+              className='text-destructive text-sm'
+            >
+              {t(warning.message, { name: warning.name })}
+            </p>
+          ))}
           {load.isPending && <LoadingState />}
           {load.isError && (
             <ErrorState
@@ -460,6 +488,11 @@ export function SyncWizardDialog(props: {
                   {t('Metadata language')}: {preview.source.locale}
                 </p>
               </div>
+              <p className='text-muted-foreground text-xs'>
+                {t(
+                  'Model metadata is read from bound channels, then normalized. Supplementation preserves existing nonempty fields.'
+                )}
+              </p>
               <div className='flex flex-wrap gap-3'>
                 <Select
                   value={scope}
@@ -611,6 +644,41 @@ export function SyncWizardDialog(props: {
                     cell: (item) => (
                       <span className='block max-w-64 font-mono text-sm break-all whitespace-normal'>
                         {item.model_name}
+                        {item.metadata_source &&
+                          item.metadata_source !== 'catalog' && (
+                            <span className='text-muted-foreground mt-1 block font-sans text-xs'>
+                              {t(
+                                item.metadata_source === 'alias'
+                                  ? 'Metadata alias rule'
+                                  : 'Bound channel metadata'
+                              )}
+                            </span>
+                          )}
+                        {item.metadata_origins?.map((origin) => (
+                          <span
+                            className='text-muted-foreground mt-1 block font-sans text-xs'
+                            key={origin.channel_id}
+                          >
+                            {origin.channel_name} · {origin.source_name} ·{' '}
+                            {origin.upstream_model}
+                          </span>
+                        ))}
+                        {Boolean(item.metadata_conflicts?.length) && (
+                          <span className='text-destructive mt-1 block font-sans text-xs'>
+                            {t(
+                              'Conflicting channel fields skipped: {{fields}}',
+                              { fields: item.metadata_conflicts?.join(', ') }
+                            )}
+                          </span>
+                        )}
+                        {item.metadata_model &&
+                          item.metadata_model !== item.model_name && (
+                            <span className='text-muted-foreground mt-1 block font-sans text-xs'>
+                              {t('Metadata from {{model}}', {
+                                model: item.metadata_model,
+                              })}
+                            </span>
+                          )}
                       </span>
                     ),
                   },

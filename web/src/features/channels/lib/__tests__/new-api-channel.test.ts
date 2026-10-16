@@ -226,6 +226,27 @@ describe('New API (Legacy) channel', () => {
       'super_key'
     )
   })
+
+  test('never rehydrates an account credential into an edit form', () => {
+    const channel = channelSchema.parse({
+      id: 1,
+      name: 'Own upstream account',
+      type: CHANNEL_TYPE_NEW_API_LEGACY,
+      key: '',
+      status: 1,
+      created_time: 1,
+      test_time: 0,
+      response_time: 0,
+      balance_updated_time: 0,
+      setting: JSON.stringify({
+        super_key: 'must-not-return-to-form',
+        super_key_user_id: 42,
+      }),
+    })
+    const defaults = transformChannelToFormDefaults(channel)
+    expect(defaults.super_key).toBe('')
+    expect(defaults.super_key_user_id).toBe(42)
+  })
 })
 
 describe('New API channel task plugin extensions', () => {

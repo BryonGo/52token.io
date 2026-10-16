@@ -61,6 +61,7 @@ export function getDisplayGroupRatio(
   model: PricingModel,
   selectedGroup?: string
 ): number {
+  if (model.channel_cost && !model.channel_cost.local_group_billing) return 1
   const modelEnableGroups = Array.isArray(model.enable_groups)
     ? model.enable_groups
     : []

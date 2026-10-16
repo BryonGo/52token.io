@@ -56,6 +56,36 @@ export type BillingPluginVariant = {
 }
 
 export type PricingModel = {
+  channel_id?: number
+  channel_name?: string
+  channel_enabled?: boolean
+  channel_cost?: {
+    local_group_billing?: boolean
+    cny_request_price?: number
+    expression?: string
+    tiers?: {
+      label: string
+      max_context?: number
+      rates: {
+        input: number
+        output: number
+        cache_read: number
+        cache_write: number
+        cache_write_1h: number
+      }
+    }[]
+    cny?: {
+      input: number
+      output: number
+      cache_read: number
+      cache_write: number
+      cache_write_1h: number
+    }
+    tier?: string
+    synced_at?: number
+    error?: string
+  }
+
   billing_plugin_variants?: BillingPluginVariant[]
   id: number
   model_name: string

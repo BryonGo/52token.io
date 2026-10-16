@@ -400,6 +400,8 @@ func SetApiRouter(router *gin.Engine) {
 		modelsRoute := apiRouter.Group("/models")
 		modelsRoute.Use(middleware.AdminAuth())
 		{
+			modelsRoute.GET("/metadata-sources", controller.GetMetadataSources)
+			modelsRoute.PUT("/metadata-sources", controller.SaveMetadataSources)
 			modelsRoute.GET("/sync_upstream/preview", controller.SyncUpstreamPreview)
 			modelsRoute.POST("/sync_upstream", controller.SyncUpstreamModels)
 			modelsRoute.POST("/delete", controller.BatchDeleteModelMeta)

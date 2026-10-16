@@ -186,6 +186,17 @@ export type MetadataSyncValues = {
 }
 export type MetadataSyncCandidate = {
   model_name: string
+  metadata_model?: string
+  metadata_source?: 'catalog' | 'channel' | 'alias'
+  fill_only?: boolean
+  metadata_origins?: Array<{
+    channel_id: number
+    channel_name: string
+    source_id: string
+    source_name: string
+    upstream_model: string
+  }>
+  metadata_conflicts?: string[]
   kind:
     | 'create'
     | 'update'
@@ -204,6 +215,7 @@ export type MetadataSyncCandidate = {
   vendor_to_create?: string
 }
 export type MetadataSyncSource = {
+  warnings?: Array<{ message: string; name?: string }>
   locale: SyncLocale
   models_url: string
   vendors_url: string

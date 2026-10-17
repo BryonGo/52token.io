@@ -2,6 +2,7 @@ package plugins
 
 import (
 	"io/fs"
+	"slices"
 	"strings"
 	"testing"
 
@@ -11,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var expectedKeys = []string{"alibaba", "doubao", "google", "hailuo", "jimeng", "kling", "sora", "sunoapi", "vertex-ai", "vidu", "xai"}
+var expectedKeys = []string{"alibaba", "byteplus", "doubao", "google", "hailuo", "jimeng", "kling", "newtoken", "sora", "sunoapi", "vertex-ai", "vidu", "xai"}
 
 func TestBuiltInVendorPluginsDeclareNativeRoutesAndLegacyChannelTypes(t *testing.T) {
 	generation := jsplugin.DefaultRegistry.Generation()
@@ -103,7 +104,8 @@ func TestBuiltInTaskPluginResponsesAndUsageContracts(t *testing.T) {
 			actualKeys = append(actualKeys, entry.Name())
 		}
 	}
-	assert.Equal(t, expectedKeys, actualKeys)
+	// WaveSpeed is a factory plugin but does not claim the Responses protocol.
+	assert.ElementsMatch(t, append(append([]string(nil), expectedKeys...), "wavespeed"), actualKeys)
 
 	for _, key := range expectedKeys {
 		t.Run(key, func(t *testing.T) {
@@ -129,6 +131,10 @@ func TestBuiltInTaskPluginResponsesAndUsageContracts(t *testing.T) {
 			assert.Equal(t, []string{"stream", "sync", "background"}, responsesClaim.Supports)
 			for _, model := range plugin.Meta.Models {
 				binding, claimed := registry.Generation().LookupEndpoint("POST", "/v1/responses", model)
+				if len(responsesClaim.Models) > 0 && !slices.Contains(responsesClaim.Models, model) {
+					assert.False(t, claimed, model)
+					continue
+				}
 				require.True(t, claimed, model)
 				assert.Same(t, plugin, binding.Plugin)
 			}

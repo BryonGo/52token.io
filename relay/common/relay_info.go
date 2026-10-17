@@ -30,6 +30,11 @@ type ThinkingContentInfo struct {
 	HasSentThinkingContent  bool
 }
 
+// TaskSubmitEventWriter is request-local. Native ephemeral SSE routes deliver
+// partial events while the terminal event waits for persistence and settlement.
+type TaskSubmitEventWriter func(event string, data []byte, terminal bool)
+type TaskSubmitEventWriterKey struct{}
+
 const (
 	LastMessageTypeNone     = convmeta.LastMessageTypeNone
 	LastMessageTypeText     = convmeta.LastMessageTypeText

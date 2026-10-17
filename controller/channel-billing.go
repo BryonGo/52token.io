@@ -746,7 +746,14 @@ func fetchAdvancedCustomBalance(channel *model.Channel) (channelBalanceResult, e
 }
 
 func updateChannelBalance(channel *model.Channel) (channelBalanceResult, error) {
-	if (channel.Type == constant.ChannelTypeAdvancedCustom || channel.Type == constant.ChannelTypeNewAPI || channel.Type == constant.ChannelTypeNewAPILegacy) && strings.TrimSpace(channel.GetSetting().SuperKey) != "" {
+	if channel.Type == constant.ChannelTypeTaskPlugin {
+		if channel.GetSetting().TaskPluginKey != "newtoken" {
+			return channelBalanceResult{}, common.NewMessage("Task Plugin channels do not support balance queries")
+		}
+		balance, err := updateChannelNewAPILegacyBalance(channel)
+		return channelBalanceResult{Balance: balance}, err
+	}
+	if (channel.Type == constant.ChannelTypeOpenAI || channel.Type == constant.ChannelTypeAdvancedCustom || channel.Type == constant.ChannelTypeNewAPI || channel.Type == constant.ChannelTypeNewAPILegacy) && strings.TrimSpace(channel.GetSetting().SuperKey) != "" {
 		balance, err := updateChannelNewAPILegacyBalance(channel)
 		return channelBalanceResult{Balance: balance}, err
 	}
@@ -837,10 +844,6 @@ func UpdateChannelBalance(c *gin.Context) {
 	channel, err := model.CacheGetChannel(id)
 	if err != nil {
 		common.ApiError(c, err)
-		return
-	}
-	if channel.Type == constant.ChannelTypeTaskPlugin {
-		c.JSON(http.StatusOK, gin.H{"success": false, "message": "Task Plugin channels do not support balance queries"})
 		return
 	}
 	if channel.ChannelInfo.IsMultiKey {

@@ -65,6 +65,7 @@ import { Switch } from '@/components/ui/switch'
 import { getPaymentErrorTranslation } from '@/features/wallet/lib/payment'
 import { getCurrencyDisplay, getCurrencyLabel } from '@/lib/currency'
 import { handleServerError } from '@/lib/handle-server-error'
+import { useGroupLabelStore } from '@/stores/group-label-store'
 
 import {
   createPlan,
@@ -96,6 +97,7 @@ export function SubscriptionsMutateDrawer({
   currentRow,
 }: Props) {
   const { t } = useTranslation()
+  const groupLabels = useGroupLabelStore((s) => s.labels)
   const isEdit = !!currentRow?.plan?.id
   const { triggerRefresh } = useSubscriptions()
   const { meta: currencyMeta } = getCurrencyDisplay()
@@ -413,7 +415,7 @@ export function SubscriptionsMutateDrawer({
                             { value: '__none__', label: t('No Upgrade') },
                             ...groupOptions.map((g) => ({
                               value: g,
-                              label: g,
+                              label: groupLabels[g]?.name || g,
                             })),
                           ]}
                           onValueChange={(v) =>
@@ -444,7 +446,7 @@ export function SubscriptionsMutateDrawer({
                             },
                             ...groupOptions.map((g) => ({
                               value: g,
-                              label: g,
+                              label: groupLabels[g]?.name || g,
                             })),
                           ]}
                           onValueChange={(v) =>

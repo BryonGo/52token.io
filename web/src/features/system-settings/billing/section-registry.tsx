@@ -1,3 +1,11 @@
+import { useTranslation } from 'react-i18next'
+
+import { Button } from '@/components/ui/button'
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible'
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -22,6 +30,7 @@ import { CheckinSettingsSection } from '../general/checkin-settings-section'
 import { PricingSection } from '../general/pricing-section'
 import { QuotaSettingsSection } from '../general/quota-settings-section'
 import { PaymentSettingsSection } from '../integrations/payment-settings-section'
+import { GroupManager } from '../models/group-manager'
 import { RatioSettingsCard } from '../models/ratio-settings-card'
 import type { BillingSettings } from '../types'
 import { createSectionRegistry } from '../utils/section-registry'
@@ -52,6 +61,29 @@ const getGroupDefaults = (settings: BillingSettings) => ({
   GroupSpecialUsableGroup:
     settings['group_ratio_setting.group_special_usable_group'],
 })
+
+function GroupManagementSection({ settings }: { settings: BillingSettings }) {
+  const { t } = useTranslation()
+  return (
+    <div className='space-y-6'>
+      <GroupManager />
+      <Collapsible>
+        <CollapsibleTrigger render={<Button variant='outline' />}>
+          {t('Advanced group settings')}
+        </CollapsibleTrigger>
+        <CollapsibleContent className='pt-4'>
+          <RatioSettingsCard
+            titleKey='Advanced group settings'
+            modelDefaults={getModelDefaults(settings)}
+            groupDefaults={getGroupDefaults(settings)}
+            toolPricesDefault={settings['tool_price_setting.prices']}
+            visibleTabs={['groups']}
+          />
+        </CollapsibleContent>
+      </Collapsible>
+    </div>
+  )
+}
 
 const BILLING_SECTIONS = [
   {
@@ -124,15 +156,9 @@ const BILLING_SECTIONS = [
   },
   {
     id: 'group-pricing',
-    titleKey: 'Group Pricing',
+    titleKey: 'Group management',
     build: (settings: BillingSettings) => (
-      <RatioSettingsCard
-        titleKey='Group Pricing'
-        modelDefaults={getModelDefaults(settings)}
-        groupDefaults={getGroupDefaults(settings)}
-        toolPricesDefault={settings['tool_price_setting.prices']}
-        visibleTabs={['groups']}
-      />
+      <GroupManagementSection settings={settings} />
     ),
   },
   {

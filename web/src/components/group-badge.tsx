@@ -20,6 +20,7 @@ import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { cn } from '@/lib/utils'
+import { useGroupLabelStore } from '@/stores/group-label-store'
 
 import { StatusBadge, type StatusBadgeProps } from './status-badge'
 import { Badge } from './ui/badge'
@@ -95,8 +96,11 @@ export function GroupBadge(props: GroupBadgeProps) {
   const isAutoGroup = groupName === 'auto'
   const isEmptyGroup = !groupName
   const isSpecialGroup = isAutoGroup || isEmptyGroup
+  const displayName = useGroupLabelStore((s) =>
+    groupName ? s.labels[groupName]?.name : undefined
+  )
   const label = getGroupLabel({
-    labelOverride,
+    labelOverride: labelOverride || displayName,
     groupName,
     isAutoGroup,
     isEmptyGroup,

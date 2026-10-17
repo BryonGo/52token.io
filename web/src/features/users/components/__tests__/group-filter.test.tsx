@@ -32,6 +32,7 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 import { api } from '@/lib/api'
 import { Route as UsersRoute } from '@/routes/_authenticated/users/index'
 import { useAuthStore } from '@/stores/auth-store'
+import { useGroupLabelStore } from '@/stores/group-label-store'
 
 import { UsersProvider } from '../users-provider'
 import { UsersTable } from '../users-table'
@@ -49,6 +50,7 @@ beforeEach(() => {
 afterEach(() => {
   clients.splice(0).forEach((client) => client.clear())
   localStorage.clear()
+  useGroupLabelStore.setState({ labels: {} })
   useAuthStore.getState().auth.reset()
 })
 
@@ -151,4 +153,18 @@ it('restores the user group filter from the page URL on load', async () => {
   expect(get).toHaveBeenCalledWith(premiumSearchUrl)
   expect(get).not.toHaveBeenCalledWith('/api/user/', expect.anything())
   expect(getGroupFilterTrigger()).toHaveTextContent('premium')
+})
+
+it('shows a renamed group in the filter while sending its original fixed ID', async () => {
+  useGroupLabelStore.setState({
+    labels: { premium: { name: 'Renamed premium' } },
+  })
+  const { get, router } = await renderUsers()
+  await userEvent.click(getGroupFilterTrigger())
+  await userEvent.click(
+    await screen.findByRole('option', { name: /Renamed premium/ })
+  )
+  await waitFor(() => expect(get).toHaveBeenCalledWith(premiumSearchUrl))
+  expect(router.state.location.search).toMatchObject({ group: ['premium'] })
+  expect(getGroupFilterTrigger()).toHaveTextContent('Renamed premium')
 })

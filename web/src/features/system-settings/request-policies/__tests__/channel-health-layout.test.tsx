@@ -68,6 +68,25 @@ describe('channel health layout', () => {
     expect(within(options).queryByRole('switch')).not.toBeInTheDocument()
   })
 
+  it('explains model-only parking and prevents intervals below thirty minutes', () => {
+    show()
+    const interval = screen.getByRole('spinbutton', {
+      name: 'Test interval (minutes)',
+    })
+    expect(interval).toHaveAttribute('min', '30')
+    expect(interval).toHaveValue(30)
+    expect(
+      screen.getByText(
+        'Images, videos and audio use free model discovery only. Generation is never requested by scheduled checks or Test All.'
+      )
+    ).toBeVisible()
+    expect(
+      screen.queryByRole('spinbutton', {
+        name: 'Health check timeout threshold (seconds)',
+      })
+    ).not.toBeInTheDocument()
+  })
+
   it('marks every switch row as full width so it never shares a grid row with an input', () => {
     show()
     for (const name of [
@@ -89,9 +108,6 @@ describe('channel health layout', () => {
     )?.parentElement
     expect(grid).toHaveAttribute('data-settings-form-span', 'full')
     for (const control of [
-      screen.getByRole('spinbutton', {
-        name: 'Health check timeout threshold (seconds)',
-      }),
       screen.getByRole('textbox', { name: 'Auto-disable status codes' }),
       screen.getByRole('textbox', { name: 'Failure keywords' }),
     ]) {

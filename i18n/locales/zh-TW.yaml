@@ -74,3 +74,6 @@ channel.upstream_update_added_models: "新增模型範例（顯示 {{.Shown}}/{{
 channel.upstream_update_removed_models: "刪除模型範例（顯示 {{.Shown}}/{{.Total}}）：{{.Models}}"
 channel.upstream_update_failed_channels: "失敗管道 ID（顯示 {{.Shown}}/{{.Total}}）：{{.Ids}}"
 channel.upstream_update_more_omitted: "（其餘 {{.Count}} 個已省略）"
+
+catalog.temporarily_unavailable: "模型目錄暫時無法使用"
+catalog.pricing_id_not_found: "在目前啟用的模型目錄中找不到該價格 ID"

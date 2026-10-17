@@ -46,7 +46,7 @@ func SyncChannelCost(ctx context.Context, id int) (*channelcost.Snapshot, error)
 		return nil, err
 	}
 	base := strings.TrimRight(channel.GetBaseURL(), "/")
-	if base == "" && cfg.Source == "deepseek" && channel.Type == 43 {
+	if base == "" && channel.Type == 43 {
 		base = "https://api.deepseek.com"
 	}
 	source, err := model.GetChannelPriceSource(cfg.Source)
@@ -137,11 +137,18 @@ func SyncChannelCost(ctx context.Context, id int) (*channelcost.Snapshot, error)
 }
 
 func fetchChannelCostDocument(ctx context.Context, endpoint string) ([]byte, error) {
+	return fetchChannelCostDocumentWithAuth(ctx, endpoint, "", 0)
+}
+func fetchChannelCostDocumentWithAuth(ctx context.Context, endpoint, token string, userID int) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "52token-cost-sync/1.0")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("New-Api-User", strconv.Itoa(userID))
+	}
 	response, err := channelCostHTTP.Do(req)
 	if err != nil {
 		return nil, errors.New("Unable to fetch upstream prices")
@@ -167,6 +174,13 @@ func parseHappyCost(body []byte, group string, quotaUnit float64) (map[string]ch
 }
 
 func parseDeepSeekCost(body []byte) (map[string]channelcost.Price, error) {
+	return parseDeepSeekCostCurrency(body, "CNY")
+}
+func parseDeepSeekCostCurrency(body []byte, currency string) (map[string]channelcost.Price, error) {
+	if currency != "CNY" && currency != "USD" {
+		return nil, errors.New("Invalid upstream price currency")
+	}
+
 	doc, err := html.Parse(strings.NewReader(string(body)))
 	if err != nil {
 		return nil, err
@@ -202,27 +216,40 @@ func parseDeepSeekCost(body []byte) (map[string]channelcost.Price, error) {
 	headerOK := false
 	values := [][2]float64{}
 	for _, row := range rows {
-		if len(row) == 3 && row[0] == "模型" && strings.HasPrefix(row[1], "deepseek-flash") && row[2] == "deepseek-v4-pro" {
+		if len(row) == 3 && (row[0] == "模型" || row[0] == "MODEL") && strings.HasPrefix(row[1], "deepseek-flash") && row[2] == "deepseek-v4-pro" {
 			headerOK = true
 		}
 		if len(row) < 3 {
 			continue
 		}
 		label := strings.Join(row[:len(row)-2], "")
-		if !strings.Contains(label, "空闲时段") && !strings.Contains(label, "高峰时段") {
+		expected := []string{"缓存命中", "高峰时段", "缓存未命中", "高峰时段", "输出", "高峰时段"}
+		if currency == "USD" {
+			if !strings.Contains(label, "OFF-PEAK") && !strings.Contains(label, "PEAK") {
+				continue
+			}
+			expected = []string{"CACHEHIT", "PEAK", "CACHEMISS", "PEAK", "OUTPUT", "PEAK"}
+		} else if !strings.Contains(label, "空闲时段") && !strings.Contains(label, "高峰时段") {
 			continue
 		}
-		expected := []string{"缓存命中", "高峰时段", "缓存未命中", "高峰时段", "输出", "高峰时段"}
 		if len(values) >= 6 || !strings.Contains(label, expected[len(values)]) {
 			return nil, errors.New("DeepSeek pricing format has changed")
 		}
 		pair := [2]float64{}
 		for i := range 2 {
 			s := row[len(row)-2+i]
-			if !strings.HasSuffix(s, "元") {
-				return nil, errors.New("DeepSeek CNY prices are unavailable")
+			if currency == "USD" {
+				if !strings.HasPrefix(s, "$") {
+					return nil, errors.New("DeepSeek USD prices are unavailable")
+				}
+				s = strings.TrimPrefix(s, "$")
+			} else {
+				if !strings.HasSuffix(s, "元") {
+					return nil, errors.New("DeepSeek CNY prices are unavailable")
+				}
+				s = strings.TrimSuffix(s, "元")
 			}
-			v, err := strconv.ParseFloat(strings.TrimSuffix(s, "元"), 64)
+			v, err := strconv.ParseFloat(s, 64)
 			if err != nil || !channelcost.Positive(v) {
 				return nil, errors.New("Invalid upstream token prices")
 			}
@@ -232,7 +259,12 @@ func parseDeepSeekCost(body []byte) (map[string]channelcost.Price, error) {
 	}
 	// Guard the schedule contract too: a pricing policy change requires review.
 	content := strings.Join(strings.Fields(textContent(doc)), "")
-	if !headerOK || len(values) != 6 || !strings.Contains(content, "9:00-12:00、14:00-18:00") || !strings.Contains(content, "不含中国法定节假日") {
+	scheduleOK := strings.Contains(content, "9:00-12:00、14:00-18:00") && strings.Contains(content, "不含中国法定节假日")
+	if currency == "USD" {
+		content = strings.NewReplacer("–", "-", "—", "-").Replace(content)
+		scheduleOK = strings.Contains(content, "01:00-04:00and06:00-10:00UTC") && strings.Contains(content, "MondaythroughFriday") && strings.Contains(content, "excludingChinesepublicholidays")
+	}
+	if !headerOK || len(values) != 6 || !scheduleOK {
 		return nil, errors.New("DeepSeek pricing format has changed")
 	}
 	prices := map[string]channelcost.Price{}

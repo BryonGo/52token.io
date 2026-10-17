@@ -222,7 +222,10 @@ it('requests channel models and distinguishes catalog policy from availability u
   expect(warning?.querySelector('svg')).toBeInTheDocument()
   expect(warning).not.toHaveClass('text-success')
   expect(screen.getAllByText('Missing metadata')).toHaveLength(2)
-  expect(screen.getAllByText('Channels 0 · Groups 0')).toHaveLength(3)
+  expect(screen.getAllByText('Channels (0 total)')).toHaveLength(3)
+  expect(screen.getAllByText('Groups (0 total)')).toHaveLength(3)
+  expect(screen.getAllByText('No available channels')).toHaveLength(3)
+  expect(screen.getAllByText('No enabled groups')).toHaveLength(3)
   expect(
     screen.queryByText(
       'No channel is configured. This model will not appear in the model square.'
@@ -258,6 +261,64 @@ it('requests channel models and distinguishes catalog policy from availability u
     )
   ).toBeVisible()
 })
+
+it.each(['desktop', 'mobile'])(
+  'shows channel and group names with explicit counts in the %s list, including after changing language',
+  async (layout) => {
+    if (layout === 'mobile') {
+      const originalMatchMedia = window.matchMedia
+      vi.spyOn(window, 'matchMedia').mockImplementation((query) => ({
+        ...originalMatchMedia(query),
+        matches: query === '(max-width: 640px)',
+      }))
+    }
+    const longName = `POJIA-DeepSeek-${'development-channel-'.repeat(8)}`
+    await renderList([
+      {
+        ...channel,
+        model_name: 'deepseek-shared',
+        bound_channels: [
+          { name: 'HappyAPI', type: 66 },
+          { name: longName, type: 59 },
+        ],
+        enable_groups: ['DeepSeek'],
+      },
+      {
+        ...channel,
+        model_name: 'deepseek-official',
+        bound_channels: [{ name: 'DeepSeek Official', type: 43 }],
+        enable_groups: ['Internal', 'Development'],
+      },
+    ])
+    const channels = within(
+      screen.getByRole('group', { name: 'Channels (2 total)' })
+    )
+    expect(channels.getByText(/HappyAPI/)).toBeVisible()
+    expect(channels.getByText(new RegExp(longName))).toHaveClass(
+      'wrap-anywhere',
+      'whitespace-normal'
+    )
+    expect(
+      screen.getByRole('group', { name: 'Channels (1 total)' })
+    ).toHaveTextContent('DeepSeek Official')
+    expect(
+      screen.getByRole('group', { name: 'Groups (1 total)' })
+    ).toHaveTextContent('DeepSeek')
+    const groups = screen.getByRole('group', { name: 'Groups (2 total)' })
+    expect(groups).toHaveTextContent('Internal')
+    expect(groups).toHaveTextContent('Development')
+    await act(async () => {
+      await i18n.changeLanguage('zhCN')
+    })
+    expect(
+      screen.getByRole('group', { name: '渠道（2 个）' })
+    ).toHaveTextContent('HappyAPI')
+    expect(
+      screen.getByRole('group', { name: '分组（1 个）' })
+    ).toHaveTextContent('DeepSeek')
+    expect(screen.queryByText('渠道 2 · 分组 1')).not.toBeInTheDocument()
+  }
+)
 
 it('keeps channel rows individually selectable and disables metadata mutations for mixed selection', async () => {
   await renderList()
@@ -298,7 +359,7 @@ it('keeps channel rows individually selectable and disables metadata mutations f
   ).toBeEnabled()
 })
 
-it('keeps long model names and translated channel labels truncated inside their existing cells', async () => {
+it('keeps long model titles compact while translating explicit channel and group counts', async () => {
   const longName =
     'provider/very-long-channel-model-with-detailed-version-and-context-window'
   await renderList([
@@ -310,20 +371,19 @@ it('keeps long model names and translated channel labels truncated inside their 
   await act(async () => {
     await i18n.changeLanguage('fr')
   })
-  const label = screen.getAllByText(
-    i18n.t('Channels {{channels}} · Groups {{groups}}', {
-      channels: 0,
-      groups: 0,
-    })
-  )[0]
-  expect(label).toHaveClass('whitespace-normal', 'sm:truncate')
-  expect(label).toHaveAttribute('tabindex', '0')
+  expect(
+    screen.getAllByRole('group', { name: 'Canaux (0 au total)' })
+  ).toHaveLength(2)
+  expect(
+    screen.getAllByRole('group', { name: 'Groupes (0 au total)' })
+  ).toHaveLength(2)
   await act(async () => {
     await i18n.changeLanguage('zhCN')
   })
   expect(screen.getByText('缺元数据')).toBeVisible()
   expect(screen.getByText('已隐藏')).toBeVisible()
-  expect(screen.getAllByText('渠道 0 · 分组 0')).toHaveLength(2)
+  expect(screen.getAllByText('渠道（0 个）')).toHaveLength(2)
+  expect(screen.getAllByText('分组（0 个）')).toHaveLength(2)
 })
 
 it('prefills and creates metadata only when the user explicitly saves it', async () => {
@@ -370,9 +430,12 @@ it('keeps prices and channel explanations readable in the mobile card and detail
   expect(within(price).getByText('USD / 1M tokens')).toHaveClass(
     'whitespace-normal'
   )
-  expect(screen.getByText('Channels 0 · Groups 0')).toHaveClass(
-    'whitespace-normal'
-  )
+  expect(
+    screen.getByRole('group', { name: 'Channels (0 total)' })
+  ).toHaveTextContent('No available channels')
+  expect(
+    screen.getByRole('group', { name: 'Groups (0 total)' })
+  ).toHaveTextContent('No enabled groups')
   const user = userEvent.setup()
   await user.click(screen.getByRole('button', { name: 'catalog-only' }))
   await user.click(screen.getByRole('tab', { name: 'Channels and groups' }))
@@ -784,7 +847,7 @@ it('filters actual visibility independently of policy and restores filters throu
   expect(router.state.location.search).toMatchObject({ status: ['enabled'] })
 })
 
-it('keeps all columns while collapsing tags and connection counts', async () => {
+it('keeps all columns and connection names visible while collapsing tags', async () => {
   await renderList([
     {
       ...channel,
@@ -793,7 +856,12 @@ it('keeps all columns while collapsing tags and connection counts', async () => 
       enable_groups: ['default', 'premium'],
     },
   ])
-  expect(screen.getByText('Channels 1 · Groups 2')).toBeVisible()
+  expect(
+    screen.getByRole('group', { name: 'Channels (1 total)' })
+  ).toHaveTextContent('Main')
+  const groups = screen.getByRole('group', { name: 'Groups (2 total)' })
+  expect(groups).toHaveTextContent('default')
+  expect(groups).toHaveTextContent('premium')
   expect(
     screen.getByRole('columnheader', { name: 'Sync policy' })
   ).toBeVisible()

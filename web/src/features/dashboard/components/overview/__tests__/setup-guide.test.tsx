@@ -64,6 +64,23 @@ beforeEach(() => {
             },
           },
         }
+      case '/api/token/projects':
+        return { data: { success: true, data: [] } }
+      case '/api/token/project-usage?days=30':
+        return {
+          data: {
+            success: true,
+            data: {
+              total_quota: 0,
+              period_quota: 0,
+              requests: 0,
+              timezone: 'Asia/Shanghai',
+              daily: [],
+              families: [],
+              models: [],
+            },
+          },
+        }
       case '/api/status':
         return {
           data: {
@@ -114,7 +131,7 @@ describe('overview setup guide', () => {
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
     expect(
       screen.getAllByRole('heading').map((heading) => heading.textContent)
-    ).toEqual(['Overview', 'Usage at a glance'])
+    ).toEqual(['Overview', 'Usage at a glance', 'Project usage'])
     expect(screen.queryByText('Setup guide complete')).not.toBeInTheDocument()
     expect(screen.queryByText('Setup progress: 3/3')).not.toBeInTheDocument()
     for (const name of ['API Keys', 'Channels', 'Usage Logs', 'Pricing']) {

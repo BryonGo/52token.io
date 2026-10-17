@@ -241,6 +241,10 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 	if baseUrl == "" {
 		baseUrl = channelconstant.GetChannelBaseURL(channelconstant.ChannelTypeVolcEngine)
 	}
+	baseUrl = strings.TrimRight(baseUrl, "/")
+	for strings.HasSuffix(baseUrl, "/api/v3") {
+		baseUrl = strings.TrimSuffix(baseUrl, "/api/v3")
+	}
 	specialPlan, hasSpecialPlan := channelconstant.ChannelSpecialBases[baseUrl]
 
 	switch info.RelayFormat {

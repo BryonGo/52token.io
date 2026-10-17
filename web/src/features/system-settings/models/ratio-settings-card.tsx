@@ -520,6 +520,7 @@ export function RatioSettingsCard({
     if (tab === 'groups') {
       return (
         <GroupRatioForm
+          lockGroupIDs
           form={groupForm}
           onSave={saveGroupRatios}
           isSaving={updateOption.isPending}

@@ -15,6 +15,18 @@ const VIDEO_MODELS = {
   "doubao-seedance-2-0-mini-260615": { resolutions: ["480p", "720p"], maxDuration: 15, videoInput: true },
   "doubao-seedance-2-5-260628": { resolutions: ["480p", "720p", "1080p"], maxDuration: 30, videoInput: true },
 };
+// BytePlus model IDs share capabilities, never credentials or stored prices,
+// with their corresponding Volcengine models. Keep the wire names unchanged.
+const BYTEPLUS_VIDEO_MODELS = {
+  "seedance-1-0-pro-250528": "doubao-seedance-1-0-pro-250528",
+  "seedance-1-5-pro-251215": "doubao-seedance-1-5-pro-251215",
+  "dreamina-seedance-2-0-260128": "doubao-seedance-2-0-260128",
+  "dreamina-seedance-2-0-fast-260128": "doubao-seedance-2-0-fast-260128",
+  "dreamina-seedance-2-0-mini-260615": "doubao-seedance-2-0-mini-260615",
+  "dreamina-seedance-2-5-260628": "doubao-seedance-2-5-260628",
+};
+for (const name of Object.keys(BYTEPLUS_VIDEO_MODELS)) VIDEO_MODELS[name] = VIDEO_MODELS[BYTEPLUS_VIDEO_MODELS[name]];
+VIDEO_MODELS["seedance-1-0-pro-fast-251015"] = { resolutions: ["480p", "720p", "1080p"], maxDuration: 12 };
 // Every Ark resolution tier; an endpoint ID reached through channel mapping
 // without a declared profile keeps them all and the longest Seedance duration.
 const SEEDANCE_RESOLUTIONS = ["480p", "720p", "1080p", "4k"];
@@ -100,6 +112,15 @@ const IMAGE_MODELS = {
   },
 };
 const IMAGE_RESOLUTIONS = ["1K", "1.5K", "2K", "3K", "4K"];
+const BYTEPLUS_IMAGE_MODELS = {
+  "dola-seedream-5-0-pro-260628": "doubao-seedream-5-0-pro-260628",
+  "dola-seedream-5-0-flash-260915": "doubao-seedream-5-0-flash-260915",
+  "seedream-5-0-lite-260128": "doubao-seedream-5-0-lite-260128",
+  "seedream-5-0-260128": "doubao-seedream-5-0-260128",
+  "seedream-4-5-251128": "doubao-seedream-4-5-251128",
+  "seedream-4-0-250828": "doubao-seedream-4-0-250828",
+};
+for (const name of Object.keys(BYTEPLUS_IMAGE_MODELS)) IMAGE_MODELS[name] = IMAGE_MODELS[BYTEPLUS_IMAGE_MODELS[name]];
 // Square pixel area of each preset, used only for the submit-time tier estimate.
 const IMAGE_PRESET_PIXELS = { "1K": 1048576, "1.5K": 2359296, "2K": 4194304, "3K": 9437184, "4K": 16777216 };
 // Endpoint IDs and newer models reach the image route without a profile; accept every documented option.
@@ -294,6 +315,8 @@ function capabilityUsageProfiles(models, usageSchema, usageExamples) {
   return profiles.map((profile) => ({ models: profile.models, schema: profile.schema, examples: profile.examples }));
 }
 
+const upstreamPaths = { imageGeneration: "/api/v3/images/generations" };
+
 export const meta = {
   apiVersion: 1,
   key: "doubao",
@@ -303,11 +326,12 @@ export const meta = {
     en: "Volcengine Doubao Seedance video generation and Seedream image generation",
     zh: "火山引擎豆包 Seedance 视频生成与 Seedream 图片生成",
   },
-  version: "1.3.0",
+  version: "1.4.0",
   author: { name: "QuantumNous" },
   channelTypes: [54, 45], // VolcEngine-type channels serve Ark video models with the same wire format
   models: Object.keys(VIDEO_MODELS).concat(Object.keys(IMAGE_MODELS)),
   fetchMode: "per_task",
+  submitResponseTypes: ["json", "sse"],
   upstreams: ["vendor", "new_api"],
   requiredCapabilities: ["duration-auto@1"],
   usageSchema: seedanceUsageSchema(DEFAULT_VIDEO_PROFILE),
@@ -329,6 +353,31 @@ export const meta = {
   ],
 };
 
+// Factory bundles use the same Ark driver with independent provider metadata.
+// This runs only at module initialization; no request data is kept globally.
+export function configureArkProvider(provider, videos, images, imagePath) {
+  Object.assign(meta, provider);
+  delete meta.channelTypes;
+  const videoModels = Object.keys(videos);
+  const imageModels = Object.keys(images);
+  meta.models = videoModels.concat(imageModels);
+  meta.usageProfiles = capabilityUsageProfiles(videos, seedanceUsageSchema, seedanceUsageExamples).concat(
+    capabilityUsageProfiles(images, seedreamUsageSchema, seedreamUsageExamples)
+  );
+  meta.routes = meta.routes.map((route) => {
+    const result = Object.assign({}, route, { path: route.path.replace(/^\/doubao/, "/" + meta.key).replace("/api/v3/images/generations", imagePath) });
+    if (route.decode === "createImage") result.models = imageModels;
+    if (route.decode === "createTask") result.models = videoModels;
+    return result;
+  });
+  meta.protocols = [
+    { name: "openai_responses", supports: ["stream", "sync", "background"] },
+    { name: "openai_video", models: videoModels },
+    { name: "openai_image", models: imageModels },
+  ];
+  upstreamPaths.imageGeneration = imagePath;
+}
+
 function trimmed(value) {
   return String(value || "").trim();
 }
@@ -336,7 +385,9 @@ function trimmed(value) {
 // Another New API gateway serves the Ark wire format only on this plugin's
 // prefixed native routes; Ark itself serves the unprefixed paths.
 function apiRoot(ctx) {
-  return ctx.baseUrl + (ctx.upstream && ctx.upstream.kind === "new_api" ? "/doubao" : "");
+  const root = String(ctx.baseUrl || "").replace(/\/+$/, "").replace(/(?:\/api\/v3)+$/, "");
+  const prefix = "/" + meta.key;
+  return root + (ctx.upstream && ctx.upstream.kind === "new_api" && !root.endsWith(prefix) ? prefix : "");
 }
 
 function objectValue(value, name) {
@@ -441,6 +492,20 @@ function estimateTokens(seconds, resolution) {
 function videoInputRatio(model, resolution, content) {
   const video = hasVideo(content);
   const res = trimmed(resolution).toLowerCase();
+  // BytePlus's tier ratios differ from Volcengine's even when capabilities
+  // match. Normalize against each provider's own no-video 720p rate.
+  // https://docs.byteplus.com/en/docs/modelark/model-pricing
+  if (model === "dreamina-seedance-2-5-260628") {
+    if (res === "1080p") return video ? 7.0 / 10.7 : 11.7 / 10.7;
+    return video ? 6.4 / 10.7 : 1;
+  }
+  if (model === "dreamina-seedance-2-0-260128") {
+    if (res === "1080p") return video ? 4.7 / 7 : 7.7 / 7;
+    if (res === "4k") return video ? 2.4 / 7 : 4 / 7;
+    return video ? 4.3 / 7 : 1;
+  }
+  if (model === "dreamina-seedance-2-0-fast-260128") return video ? 3.3 / 5.6 : 1;
+  if (model === "dreamina-seedance-2-0-mini-260615") return video ? 2.1 / 3.5 : 1;
   if (model === "doubao-seedance-2-5-260628") {
     if (res === "1080p") return video ? 7.0 / 10.7 : 11.7 / 10.7;
     return video ? 42 / 70 : 1;
@@ -529,6 +594,11 @@ function convertImage(ctx) {
     body[key] = req[key];
   }
   body.model = model;
+  if (req.stream !== undefined && typeof req.stream !== "boolean") throw new Error("stream must be a boolean");
+  if (req.stream === true) {
+    if (!profile.sequential) throw new Error("stream is not supported by this model");
+    body.stream = true;
+  }
   for (const key of ["watermark", "optimize_prompt", "layer_decomposition"]) {
     if (body[key] !== undefined && typeof body[key] !== "boolean") throw new Error(key + " must be a boolean");
   }
@@ -547,10 +617,8 @@ function convertImage(ctx) {
   }
   if (layered && images.length !== 1) throw new Error("layer decomposition requires exactly one input image");
   if (images.length > profile.maxReferenceImages) throw new Error("at most " + profile.maxReferenceImages + " reference images are supported");
-  // The host caps the upstream JSON response and the persisted task data at
-  // 1 MiB and serves images through artifact URLs, so it cannot reliably accept
-  // or persist Base64 image payloads; this route is URL-only.
-  if (body.response_format !== undefined && body.response_format !== "url") throw new Error("response_format must be url");
+  if (body.response_format !== undefined && body.response_format !== "url" && body.response_format !== "b64_json")
+    throw new Error("response_format must be url or b64_json");
   if (body.seed !== undefined && !Number.isInteger(body.seed)) throw new Error("seed must be an integer");
   if (body.guidance_scale !== undefined && (typeof body.guidance_scale !== "number" || !Number.isFinite(body.guidance_scale)))
     throw new Error("guidance_scale must be a number");
@@ -589,6 +657,11 @@ function convertImage(ctx) {
       throw new Error("max_images must be an integer between 1 and 15");
     maxImages = options.max_images;
   }
+  if (profile.allowedSizes) {
+    if (body.size === undefined || body.size === profile.presets[0]) body.size = profile.defaultSize;
+    if (!profile.allowedSizes.includes(body.size)) throw new Error("size must be one of " + profile.allowedSizes.join(", "));
+  }
+  if (profile.urlOnly) body.response_format = "url";
   const size = imageSize(body.size, profile, layered);
   if (size.size !== undefined) body.size = size.size;
   // Submit-time estimate; extractUsageOnComplete overlays the per-image tiers
@@ -774,9 +847,6 @@ export const native = {
     if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("request body must be an object");
     const model = trimmed(body.model);
     if (!model) throw new Error("model is required");
-    // The host presents one JSON response after the upstream call completes; upstream SSE is not forwarded.
-    if (body.stream !== undefined && body.stream !== false)
-      throw new Error("stream is not supported on this route; the complete JSON response is returned once all images are generated");
     const requestBody = Object.assign({}, body, { model: model });
     const converted = convertImage({ model: model, requestBody: requestBody });
     return { kind: "submit", model: model, action: converted.action, requestBody: requestBody };
@@ -793,9 +863,10 @@ export function buildSubmitRequest(ctx) {
   if (imageTask(ctx)) {
     const converted = convertImage(ctx);
     return {
-      url: apiRoot(ctx) + "/api/v3/images/generations",
+      url: apiRoot(ctx) + upstreamPaths.imageGeneration,
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json", Authorization: "Bearer " + ctx.apiKey },
+      responseType: converted.body.stream ? "sse" : "json",
+      headers: { "Content-Type": "application/json", Accept: converted.body.stream ? "text/event-stream" : "application/json", Authorization: "Bearer " + ctx.apiKey },
       body: converted.body,
       action: converted.action,
       rewriteModel: converted.body.model,
@@ -806,6 +877,7 @@ export function buildSubmitRequest(ctx) {
   // Reject output tiers the model does not offer before any quota is reserved.
   videoResolution(ctx);
   const body = Object.assign({ model: req.model || "", content: [] }, metadata);
+  if (body.resolution === undefined && videoProfile(ctx).defaultResolution) body.resolution = videoProfile(ctx).defaultResolution;
   const imageContent = [];
   const images = Array.isArray(req.images) ? req.images : [];
   for (const url of images) imageContent.push({ type: "image_url", image_url: { url: url } });
@@ -834,15 +906,39 @@ export function parseSubmitResponse(ctx, resp) {
     if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("invalid image generation response");
     if (body.error && typeof body.error === "object")
       throw new Error((trimmed(body.error.code) || "upstream_error") + ": " + (trimmed(body.error.message) || "image generation failed"));
-    const urls = imageURLEntries(body);
-    if (!urls.length) throw new Error("image generation returned no images");
+    const payloads = imageEntries(body).filter((item) => trimmed(item.url) || trimmed(item.b64_json));
+    if (!payloads.length) throw new Error("image generation returned no images");
     // The synchronous API has no vendor task; keep the host-issued public id.
     const taskId = trimmed(ctx.publicTaskId);
     if (!taskId) throw new Error("missing gateway task id");
-    return { taskId: taskId, taskData: body, immediate: { status: "SUCCESS", progress: "100%", url: trimmed(urls[0].url) } };
+    return { taskId: taskId, taskData: body, immediate: { status: "SUCCESS", progress: "100%", url: trimmed(payloads[0].url) } };
   }
   if (!resp.body || !resp.body.id) throw new Error("task_id is empty");
   return { taskId: resp.body.id, taskData: resp.body };
+}
+
+export function parseSubmitEvent(ctx, event, state) {
+  const value = JSON.parse(event.data);
+  const result = state || { model: ctx.upstreamModel || ctx.model, data: [] };
+  if (value.type === "error" || value.error && value.type !== "image_generation.partial_failed")
+    throw new Error(trimmed((value.error || value).message) || "image generation failed");
+  if (value.type === "image_generation.partial_succeeded" || value.type === "image_generation.partial_failed") {
+    const index = value.image_index;
+    if (!Number.isInteger(index) || index < 0 || index >= MAX_IMAGE_OUTPUTS) throw new Error("invalid image_index");
+    if (result.data[index]) throw new Error("duplicate image_index");
+    const item = {};
+    for (const key of ["url", "b64_json", "size", "output_format", "error"]) {
+      if (value[key] !== undefined) item[key] = value[key];
+    }
+    result.data[index] = item;
+  } else if (value.type === "image_generation.completed") {
+    result.usage = value.usage || {};
+    if (value.created !== undefined) result.created = value.created;
+    // A failed group member is preserved in the native response but has no image payload.
+    result.data = result.data.filter((item) => item !== null && item !== undefined);
+    return { state: result, done: true };
+  } else throw new Error("unrecognized image generation event");
+  return { state: result, done: false };
 }
 
 export function extractUsage(ctx) {
@@ -985,6 +1081,7 @@ export const protocols = {
       if (req.images !== undefined && !Array.isArray(req.images)) throw new Error("images must be an array");
       const input = responsesInput(req);
       if (imageTask({ upstreamModel: ctx.upstreamModel, model: model })) {
+        if (req.response_format !== undefined && req.response_format !== "url") throw new Error("response_format must be url");
         const prompt = input.prompt || trimmed(req.prompt);
         const listed = Array.isArray(req.image) ? req.image : req.image === undefined ? [] : [req.image];
         const images = [];
@@ -1107,8 +1204,7 @@ export const protocols = {
           });
         }
       } else throw new Error("JSON or multipart body required");
-      if (req.stream !== undefined && req.stream !== false)
-        throw new Error("stream is not supported; the complete image response is returned once all images are generated");
+      if (req.stream !== undefined && typeof req.stream !== "boolean") throw new Error("stream must be a boolean");
       if (req.response_format !== undefined && req.response_format !== "url" && req.response_format !== "b64_json")
         throw new Error("response_format must be url or b64_json");
       // Seedream has no per-request image count; multiple images come from group generation.
@@ -1118,6 +1214,10 @@ export const protocols = {
       for (const key of IMAGE_REQUEST_KEYS.concat(["prompt", "image", "background", "tools"])) {
         // The host inlines b64_json from the upstream URLs; Ark always answers with URLs.
         if (key !== "response_format" && Object.prototype.hasOwnProperty.call(req, key)) requestBody[key] = req[key];
+      }
+      if (req.stream === true) {
+        requestBody.stream = true;
+        requestBody.response_format = req.response_format || "url";
       }
       if (uploads.length) requestBody.image = [].concat(requestBody.image === undefined ? [] : requestBody.image, uploads);
       const converted = convertImage({ model: model, requestBody: requestBody });

@@ -79,6 +79,7 @@ import { ROLE } from '@/lib/roles'
 import { AuthOperationError } from '@/lib/secure-verification'
 import { requireServerSuccess } from '@/lib/server-error-message'
 import { useAuthStore } from '@/stores/auth-store'
+import { useGroupLabelStore } from '@/stores/group-label-store'
 
 import {
   createUser,
@@ -111,6 +112,7 @@ export function UsersMutateDrawer({
   currentRow,
 }: UsersMutateDrawerProps) {
   const { t } = useTranslation()
+  const groupLabels = useGroupLabelStore((s) => s.labels)
   const isUpdate = !!currentRow
   const { triggerRefresh, requestVerification } = useUsers()
   const currentUser = useAuthStore((s) => s.auth.user)
@@ -425,7 +427,7 @@ export function UsersMutateDrawer({
                           <Combobox
                             options={groups.map((group) => ({
                               value: group,
-                              label: group,
+                              label: groupLabels[group]?.name || group,
                             }))}
                             onValueChange={field.onChange}
                             value={field.value}

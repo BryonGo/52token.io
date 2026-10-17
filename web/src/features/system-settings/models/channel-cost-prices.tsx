@@ -21,13 +21,18 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import type { ChannelCostConfig } from '@/features/channels/components/channel-cost-fields'
+import { usePriceSources } from '@/features/channels/price-sources-api'
 import { api } from '@/lib/api'
-import { formatCNYAmount } from '@/lib/currency'
+import { formatCNYAmount, formatUSDAmount } from '@/lib/currency'
 import { formatNumber } from '@/lib/format'
 import { requireServerSuccess } from '@/lib/server-error-message'
 
 type Rates = { input: number; output: number; cache_read: number }
 type Cost = {
+  dynamic?: boolean
+  task_usage_billing?: boolean
+  expression?: string
+  charge_unit?: { unit: string; units: number; price: number }
   upstream_request_price?: number
   cny_request_price?: number
   upstream: Rates
@@ -52,6 +57,7 @@ const queryKey = ['channel-cost-prices']
 export function ChannelCostPrices(props: { selectSource?: boolean } = {}) {
   const { t } = useTranslation()
   const client = useQueryClient()
+  const sources = usePriceSources()
   const [selectedChannel, setSelectedChannel] = useState<string>('')
   const query = useQuery({
     queryKey,
@@ -96,12 +102,12 @@ export function ChannelCostPrices(props: { selectSource?: boolean } = {}) {
       {props.selectSource && query.data.length > 0 && (
         <div className='space-y-2'>
           <label htmlFor='channel-price-source' className='text-sm font-medium'>
-            {t('Price source')}
+            {t('Channel')} / {t('Price source')}
           </label>
           <Select
             items={query.data.map((channel) => ({
               value: String(channel.id),
-              label: `${channel.name} #${channel.id} · ${channel.source_name || (channel.config.source === 'happyapi' ? 'HappyAPI' : channel.config.source)}`,
+              label: `${channel.name} ← ${channel.source_name || (channel.config.source === 'happyapi' ? 'HappyAPI' : channel.config.source)} #${channel.id}`,
             }))}
             value={selectedChannel}
             onValueChange={(value) => {
@@ -116,11 +122,12 @@ export function ChannelCostPrices(props: { selectSource?: boolean } = {}) {
             <SelectContent>
               {query.data.map((channel) => (
                 <SelectItem key={channel.id} value={String(channel.id)}>
-                  {channel.name} #{channel.id} ·{' '}
+                  {channel.name} ←{' '}
                   {channel.source_name ||
                     (channel.config.source === 'happyapi'
                       ? 'HappyAPI'
-                      : channel.config.source)}
+                      : channel.config.source)}{' '}
+                  #{channel.id}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -156,8 +163,24 @@ export function ChannelCostPrices(props: { selectSource?: boolean } = {}) {
                   <span className='text-muted-foreground'>#{channel.id}</span>
                 </h3>
                 <p className='text-muted-foreground text-xs'>
-                  {t('Upstream credits received per CNY 1')}:{' '}
-                  {formatNumber(channel.config.credits_per_cny)} ·{' '}
+                  {t(
+                    sources.data?.sources?.find(
+                      (source) => source.id === channel.config.source
+                    )?.price_currency === 'USD'
+                      ? 'Upstream USD received per CNY 1'
+                      : 'Upstream credits received per CNY 1'
+                  )}
+                  :{' '}
+                  {sources.data?.sources?.find(
+                    (source) => source.id === channel.config.source
+                  )?.price_currency === 'USD'
+                    ? formatUSDAmount(channel.config.credits_per_cny, {
+                        digitsLarge: 14,
+                        digitsSmall: 14,
+                        abbreviate: false,
+                      })
+                    : formatNumber(channel.config.credits_per_cny)}{' '}
+                  · {t('Price source')}:{' '}
                   {channel.source_name ||
                     (channel.config.source === 'happyapi'
                       ? 'HappyAPI'
@@ -200,6 +223,31 @@ export function ChannelCostPrices(props: { selectSource?: boolean } = {}) {
                   <TableRow key={model}>
                     <TableCell className='max-w-80 break-all whitespace-normal'>
                       {model}
+                      {cost?.charge_unit && (
+                        <div className='text-muted-foreground text-xs'>
+                          {formatCNYAmount(cost.charge_unit.price, {
+                            digitsLarge: 8,
+                            digitsSmall: 8,
+                            abbreviate: false,
+                          })}{' '}
+                          × {formatNumber(cost.charge_unit.units)} /{' '}
+                          {t(
+                            cost.charge_unit.unit === 'second'
+                              ? 'Second'
+                              : 'Request'
+                          )}
+                        </div>
+                      )}
+                      {cost?.dynamic && (
+                        <div className='mt-1 text-xs'>
+                          <div className='text-muted-foreground'>
+                            {t('CNY billing expression')}
+                          </div>
+                          <code className='block max-w-80 break-all whitespace-normal'>
+                            {cost.expression}
+                          </code>
+                        </div>
+                      )}
                       {cost && cost.model !== model && (
                         <div className='text-muted-foreground text-xs'>
                           → {cost.model}
@@ -209,24 +257,28 @@ export function ChannelCostPrices(props: { selectSource?: boolean } = {}) {
                     {cost ? (
                       <>
                         <TableCell>
-                          {t(
-                            cost.cny_request_price != null
-                              ? 'Per-request'
-                              : 'Per-token'
-                          )}
+                          {cost.dynamic && t('Billing expression')}
+                          {!cost.dynamic &&
+                            t(
+                              cost.cny_request_price != null
+                                ? 'Per-request'
+                                : 'Per-token'
+                            )}
                         </TableCell>
                         <TableCell>
-                          {cost.upstream_request_price != null ? (
-                            cost.upstream_request_price.toLocaleString(
-                              undefined,
-                              { maximumFractionDigits: 8 }
-                            )
-                          ) : (
-                            <>
-                              {formatNumber(cost.upstream.input)} /{' '}
-                              {formatNumber(cost.upstream.output)}
-                            </>
-                          )}
+                          {cost.dynamic && '—'}
+                          {!cost.dynamic &&
+                            (cost.upstream_request_price != null ? (
+                              cost.upstream_request_price.toLocaleString(
+                                undefined,
+                                { maximumFractionDigits: 8 }
+                              )
+                            ) : (
+                              <>
+                                {formatNumber(cost.upstream.input)} /{' '}
+                                {formatNumber(cost.upstream.output)}
+                              </>
+                            ))}
                         </TableCell>
                         <TableCell>
                           {formatNumber(cost.upstream_group_ratio)}×
@@ -234,8 +286,11 @@ export function ChannelCostPrices(props: { selectSource?: boolean } = {}) {
                         {(['input', 'output', 'cache_read'] as const).map(
                           (kind) => (
                             <TableCell key={kind}>
-                              {cost.cny_request_price != null && '—'}
-                              {cost.cny_request_price == null &&
+                              {(cost.dynamic ||
+                                cost.cny_request_price != null) &&
+                                '—'}
+                              {!cost.dynamic &&
+                                cost.cny_request_price == null &&
                                 (cost.tiers?.length
                                   ? cost.tiers.map((tier) => (
                                       <div

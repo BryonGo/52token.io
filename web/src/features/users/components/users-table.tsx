@@ -34,6 +34,7 @@ import {
   createServerError,
   requireServerSuccess,
 } from '@/lib/server-error-message'
+import { useGroupLabelStore } from '@/stores/group-label-store'
 
 import { getGroups, getUsers, searchUsers } from '../api'
 import {
@@ -64,6 +65,7 @@ function isDisabledUserRow(user: User) {
 
 export function UsersTable() {
   const { t } = useTranslation()
+  const groupLabels = useGroupLabelStore((s) => s.labels)
   const columns = useUsersColumns()
   const { refreshTrigger } = useUsers()
   const isMobile = useMediaQuery('(max-width: 640px)')
@@ -246,7 +248,7 @@ export function UsersTable() {
             columnId: 'group',
             title: t('User Group'),
             options: (groupsData?.data ?? []).map((group) => ({
-              label: group,
+              label: groupLabels[group]?.name || group,
               value: group,
             })),
             singleSelect: true,

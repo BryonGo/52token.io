@@ -1,3 +1,19 @@
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { Loader2, AlertCircle } from 'lucide-react'
+import { useState, useEffect, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
+
+import { Dialog } from '@/components/dialog'
+import { MultiSelect } from '@/components/multi-select'
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Textarea } from '@/components/ui/textarea'
+import { handleServerError } from '@/lib/handle-server-error'
+import { requireServerSuccess } from '@/lib/server-error-message'
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -16,22 +32,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Loader2, AlertCircle } from 'lucide-react'
-import { useState, useEffect, useMemo } from 'react'
-import { useTranslation } from 'react-i18next'
-import { toast } from 'sonner'
-
-import { Dialog } from '@/components/dialog'
-import { MultiSelect } from '@/components/multi-select'
-import { Alert, AlertDescription } from '@/components/ui/alert'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Skeleton } from '@/components/ui/skeleton'
-import { Textarea } from '@/components/ui/textarea'
-import { handleServerError } from '@/lib/handle-server-error'
-import { requireServerSuccess } from '@/lib/server-error-message'
+import { useGroupLabelStore } from '@/stores/group-label-store'
 
 import {
   getTagModels,
@@ -54,6 +55,7 @@ export function TagBatchEditDialog({
   onOpenChange,
 }: TagBatchEditDialogProps) {
   const { t } = useTranslation()
+  const groupLabels = useGroupLabelStore((s) => s.labels)
   const { currentTag } = useChannels()
   const queryClient = useQueryClient()
   const [isLoading, setIsLoading] = useState(false)
@@ -77,9 +79,9 @@ export function TagBatchEditDialog({
     const allGroups = new Set([...groupsData.data, ...groups])
     return [...allGroups].map((group) => ({
       value: group,
-      label: group,
+      label: groupLabels[group]?.name || group,
     }))
-  }, [groupsData, groups])
+  }, [groupsData, groups, groupLabels])
 
   useEffect(() => {
     if (open && currentTag) {

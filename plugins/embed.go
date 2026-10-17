@@ -43,6 +43,27 @@ func Source(key string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// First-party Ark providers share the driver, while their manifests,
+	// endpoints and model capabilities remain isolated. Return a standalone
+	// source bundle so downloads and administrator overrides work unchanged.
+	if key == "byteplus" || key == "newtoken" {
+		driver, driverErr := taskPlugins.ReadFile("tasks/doubao/plugin.js")
+		if driverErr != nil {
+			return "", driverErr
+		}
+		return string(driver) + "\n" + string(source) + `
+const providerHooks = {buildSubmitRequest, parseSubmitResponse, buildQueryRequest, parseTaskResult, extractUsage, extractUsageOnComplete, listArtifacts, buildContentRequest};
+configureProvider({videoModels: VIDEO_MODELS, imageModels: IMAGE_MODELS, configure: configureArkProvider, meta, native, protocols, hooks: providerHooks});
+buildSubmitRequest = providerHooks.buildSubmitRequest;
+parseSubmitResponse = providerHooks.parseSubmitResponse;
+buildQueryRequest = providerHooks.buildQueryRequest;
+parseTaskResult = providerHooks.parseTaskResult;
+extractUsage = providerHooks.extractUsage;
+extractUsageOnComplete = providerHooks.extractUsageOnComplete;
+listArtifacts = providerHooks.listArtifacts;
+buildContentRequest = providerHooks.buildContentRequest;
+`, nil
+	}
 	return string(source), nil
 }
 

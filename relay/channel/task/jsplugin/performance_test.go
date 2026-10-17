@@ -184,7 +184,7 @@ func BenchmarkTaskPluginSSE(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
 				response := &http.Response{Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(wire))}
-				if _, err := New(plugin).readSubmitEvents(b.Context(), response, input); err != nil {
+				if _, err := New(plugin).readSubmitEvents(b.Context(), response, input, maxTaskPluginPersistedJSONBytes); err != nil {
 					b.Fatal(err)
 				}
 			}

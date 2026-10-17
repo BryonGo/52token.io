@@ -430,6 +430,15 @@ type taskSubmissionOutcome struct {
 }
 
 func RelayTask(c *gin.Context) {
+	streaming := false
+	if value, exists := c.Get(pluginruntime.ContextKeyPinnedRoute); exists {
+		pinned, valid := value.(pluginruntime.PinnedRoute)
+		request, _ := c.Get("task_request")
+		body, _ := request.(map[string]any)
+		streaming = valid && pinned.Route.RetainResult != nil && !*pinned.Route.RetainResult && body["stream"] == true
+	}
+	stream, cleanup := beginTaskSubmitStream(c, streaming)
+	defer cleanup()
 	relayInfo, err := relaycommon.GenRelayInfo(c, types.RelayFormatTask, nil, nil)
 	if err != nil {
 		respondTaskSubmissionError(c, &taskdto.TaskError{
@@ -454,7 +463,13 @@ func RelayTask(c *gin.Context) {
 
 	outcome, taskErr := executeTaskSubmission(c, relayInfo)
 	if taskErr != nil {
+		if stream.writeError(taskErr) {
+			return
+		}
 		respondTaskSubmissionError(c, taskErr)
+		return
+	}
+	if stream.finish() {
 		return
 	}
 	presentTaskSubmission(c, outcome)
@@ -624,6 +639,7 @@ func executeTaskSubmissionWith(
 	task.PrivateData.TokenId = relayInfo.TokenId
 	task.PrivateData.NodeName = common.NodeName
 	task.PrivateData.BillingContext = &model.TaskBillingContext{
+		ChannelCost:     relayInfo.PriceData.ChannelCost,
 		ModelPrice:      relayInfo.PriceData.ModelPrice,
 		GroupRatio:      relayInfo.PriceData.GroupRatioInfo.GroupRatio,
 		ModelRatio:      relayInfo.PriceData.ModelRatio,

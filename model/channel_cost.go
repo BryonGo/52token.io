@@ -3,6 +3,7 @@ package model
 import (
 	"cmp"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -11,8 +12,69 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/pkg/channelcost"
+
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"gorm.io/gorm"
 )
+
+// SaveChannelHealthState changes routing without changing purchase prices or
+// extending their freshness. A stale price snapshot is never made valid here.
+func SaveChannelHealthState(channel *Channel, nextModels, nextInfo string) error {
+	expectedFingerprint := ChannelCostFingerprint(channel)
+	optionKey := fmt.Sprintf("channel_cost.%d", channel.Id)
+	optionValue := ""
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var current Channel
+		if err := lockForUpdate(tx).First(&current, channel.Id).Error; err != nil {
+			return err
+		}
+		if current.Models != channel.Models || current.OtherInfo != channel.OtherInfo || ChannelCostFingerprint(&current) != expectedFingerprint {
+			return errors.New("channel changed while checking model health")
+		}
+		next := current
+		next.Models, next.OtherInfo = nextModels, nextInfo
+		modelsChanged := current.Models != nextModels
+		if err := tx.Model(&current).Select("models", "other_info").Updates(&next).Error; err != nil {
+			return err
+		}
+		if modelsChanged {
+			if err := next.UpdateAbilities(tx); err != nil {
+				return err
+			}
+			var option Option
+			if err := tx.Where(commonKeyCol+" = ?", optionKey).First(&option).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+			var snapshot channelcost.Snapshot
+			if option.Value != "" && common.UnmarshalJsonStr(option.Value, &snapshot) == nil && snapshot.Fingerprint == expectedFingerprint {
+				snapshot.Fingerprint = ChannelCostFingerprint(&next)
+				if ChannelCostFingerprint(channel) != expectedFingerprint {
+					return errors.New("purchase settings changed while checking model health")
+				}
+				data, err := common.Marshal(snapshot)
+				if err != nil {
+					return err
+				}
+				option.Value = string(data)
+				if err := tx.Save(&option).Error; err != nil {
+					return err
+				}
+				optionValue = option.Value
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	channel.Models, channel.OtherInfo = nextModels, nextInfo
+	if optionValue != "" {
+		common.OptionMapRWMutex.Lock()
+		common.OptionMap[optionKey] = optionValue
+		common.OptionMapRWMutex.Unlock()
+	}
+	return nil
+}
 
 func ChannelCostFingerprint(c *Channel) string {
 	// Include routing and credentials so a changed token cannot silently inherit
@@ -24,6 +86,9 @@ func ChannelCostFingerprint(c *Channel) string {
 	}
 	if cfg := settings.CostBilling; cfg != nil && cfg.Enabled {
 		if source, err := GetChannelPriceSource(cfg.Source); err == nil {
+			if token, _, err := GetPriceSourceCredential(source); err == nil && token != "" {
+				identity = append(identity, fmt.Sprintf("%x", sha256.Sum256([]byte(token))))
+			}
 			current, _ := common.Marshal(source)
 			original, _ := common.Marshal(channelcost.DefaultSources()[source.ID])
 			if string(current) != string(original) {
@@ -113,7 +178,7 @@ func channelCostCatalog(base []Pricing, channels []*Channel, now time.Time) []Pr
 				row.SupportedEndpointTypes = nil
 				for _, endpoint := range item.SupportedEndpointTypes {
 					switch endpoint {
-					case constant.EndpointTypeOpenAI, constant.EndpointTypeOpenAIResponse, constant.EndpointTypeAnthropic, constant.EndpointTypeEmbeddings:
+					case constant.EndpointTypeOpenAI, constant.EndpointTypeOpenAIResponse, constant.EndpointTypeAnthropic, constant.EndpointTypeEmbeddings, constant.EndpointTypeImageGeneration, constant.EndpointTypeOpenAIVideo:
 						row.SupportedEndpointTypes = append(row.SupportedEndpointTypes, endpoint)
 					}
 				}
@@ -136,13 +201,28 @@ func channelCostCatalog(base []Pricing, channels []*Channel, now time.Time) []Pr
 					row.ChannelCost.Error = err.Error()
 				} else {
 					source, _ := GetChannelPriceSource(cfg.Source)
-					if ref := source.Reference; ref != nil && ref.LocalGroupBilling {
+					if source.UsesLocalGroupBilling() {
 						row.ChannelCost.LocalGroupBilling = true
 						// Publish the base price for normal local group pricing. The
 						// actual purchase receipt remains separate in admin logs.
 						receipt.CNY = receipt.Upstream.Scale(1 / cfg.CreditsPerCNY)
+						receipt.Expression = "(" + receipt.Expression + ") / " + fmt.Sprintf("%.17g", receipt.GroupRatio)
+						if receipt.CNYRequestPrice != nil {
+							v := *receipt.CNYRequestPrice / receipt.GroupRatio
+							receipt.CNYRequestPrice = &v
+						}
+						for i := range receipt.Tiers {
+							receipt.Tiers[i].Rates = receipt.Tiers[i].Rates.Scale(1 / receipt.GroupRatio)
+						}
 					}
 					row.ChannelCost.CNY = &receipt.CNY
+					if receipt.Dynamic {
+						row.ChannelCost.CNY = nil
+						if dynamic := GetChannelCostSnapshot(ch.Id).Prices[item.ModelName].Dynamic; dynamic != nil && dynamic.Task {
+							encoded, _ := common.Marshal(dynamic.UsageSchema)
+							_ = common.Unmarshal(encoded, &row.BillingUsageSchema)
+						}
+					}
 					if receipt.CNYRequestPrice != nil {
 						row.ChannelCost.CNY = nil
 						row.ChannelCost.CNYRequestPrice = receipt.CNYRequestPrice

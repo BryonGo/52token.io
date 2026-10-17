@@ -1,3 +1,4 @@
+import { zodResolver } from '@hookform/resolvers/zod'
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -16,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { zodResolver } from '@hookform/resolvers/zod'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import {
   fireEvent,
   render,
@@ -30,8 +31,13 @@ import { useForm } from 'react-hook-form'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 
+import { GroupBadge } from '@/components/group-badge'
+import { api } from '@/lib/api'
+import { useGroupLabelStore } from '@/stores/group-label-store'
+
 import { SettingsPageProvider } from '../../components/settings-page-context'
 import { positiveIntegerSchema } from '../../utils/numeric-field'
+import { GroupManager } from '../group-manager'
 import { GroupRatioForm } from '../group-ratio-form'
 
 const defaults = {
@@ -60,6 +66,7 @@ function Fixture(props: {
   onSave?: (values: typeof defaults) => Promise<void>
   initial?: Partial<typeof defaults>
   isSaving?: boolean
+  lockGroupIDs?: boolean
 }) {
   const [actions, setActions] = useState<HTMLDivElement | null>(null)
   const form = useForm({
@@ -73,6 +80,7 @@ function Fixture(props: {
         form={form}
         onSave={props.onSave ?? (async () => {})}
         isSaving={props.isSaving ?? false}
+        lockGroupIDs={props.lockGroupIDs}
       />
     </SettingsPageProvider>
   )
@@ -128,7 +136,9 @@ describe('group settings workspace', () => {
         .map((input) => input.value)
     ).toEqual(['group_2', 'group_1', 'default', 'vip'])
 
-    await user.click(screen.getByRole('button', { name: 'Save group settings' }))
+    await user.click(
+      screen.getByRole('button', { name: 'Save group settings' })
+    )
     await waitFor(() => expect(onSave).toHaveBeenCalled())
     const saved = onSave.mock.calls[0][0]
     expect(JSON.parse(saved.GroupRatio)).toEqual({
@@ -201,7 +211,9 @@ describe('group settings workspace', () => {
     expect(screen.getByRole('button', { name: 'Move vip up' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Move vip down' })).toBeDisabled()
     await user.click(screen.getByRole('tab', { name: 'Pricing groups' }))
-    await user.click(screen.getByRole('button', { name: 'Save group settings' }))
+    await user.click(
+      screen.getByRole('button', { name: 'Save group settings' })
+    )
     await waitFor(() => expect(onSave).toHaveBeenCalled())
     expect(onSave.mock.calls[0]?.[0]).toEqual(
       expect.objectContaining({
@@ -244,7 +256,9 @@ describe('group settings workspace', () => {
     )
     expect(screen.getByText('Not in pricing table')).toBeVisible()
     await user.click(screen.getByRole('tab', { name: 'Pricing groups' }))
-    await user.click(screen.getByRole('button', { name: 'Save group settings' }))
+    await user.click(
+      screen.getByRole('button', { name: 'Save group settings' })
+    )
     await waitFor(() => expect(onSave).toHaveBeenCalled())
     expect(JSON.parse(onSave.mock.calls[0][0].AutoGroups)).toEqual([
       'vip',
@@ -286,7 +300,9 @@ describe('group settings workspace', () => {
       { target: { value: '0' } }
     )
     await user.click(screen.getByRole('tab', { name: 'Pricing groups' }))
-    await user.click(screen.getByRole('button', { name: 'Save group settings' }))
+    await user.click(
+      screen.getByRole('button', { name: 'Save group settings' })
+    )
     await waitFor(() =>
       expect(
         screen.getByRole('tab', { name: 'Auto group order' })
@@ -342,4 +358,96 @@ describe('group settings workspace', () => {
       screen.getAllByRole('textbox', { name: 'Group description' })[1]
     ).toHaveValue('Updated description')
   })
+})
+
+it('renames display labels while preserving the fixed group ID and multiplier', async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
+  const oldLabels = useGroupLabelStore.getState().labels
+  const group = {
+    id: 'route_08',
+    name: 'POJIA',
+    ratio: 0.08,
+    selectable: true,
+    description: '',
+    defined: true,
+    channels: [{ id: 134, name: 'POJIA DeepSeek' }],
+    token_count: 2,
+    user_count: 0,
+  }
+  const get = vi.spyOn(api, 'get').mockResolvedValue({
+    data: { success: true, data: { version: 'revision-1', groups: [group] } },
+  })
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true, data: { id: 'route_08' } } })
+  try {
+    useGroupLabelStore.setState({ labels: { route_08: { name: 'POJIA' } } })
+    render(
+      <QueryClientProvider client={client}>
+        <GroupManager />
+        <div data-testid='bound-key-label'>
+          <GroupBadge group='route_08' />
+        </div>
+      </QueryClientProvider>
+    )
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Edit' }))
+    expect(screen.getByLabelText('Fixed group ID')).toHaveValue('route_08')
+    expect(screen.getByLabelText('Fixed group ID')).toHaveAttribute('readonly')
+    await user.clear(screen.getByLabelText('Group name'))
+    await user.type(screen.getByLabelText('Group name'), 'POJIA DeepSeek')
+    await user.click(screen.getByRole('button', { name: /^Save$/ }))
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith(
+        '/api/group/managed',
+        expect.objectContaining({
+          id: 'route_08',
+          name: 'POJIA DeepSeek',
+          ratio: 0.08,
+          version: 'revision-1',
+        })
+      )
+    )
+    await waitFor(() =>
+      expect(
+        within(screen.getByTestId('bound-key-label')).getByText(
+          'POJIA DeepSeek'
+        )
+      ).toBeVisible()
+    )
+  } finally {
+    client.clear()
+    get.mockRestore()
+    put.mockRestore()
+    useGroupLabelStore.setState({ labels: oldLabels })
+  }
+})
+
+it('keeps group identities read-only in the advanced editor while allowing multiplier edits', async () => {
+  render(<Fixture lockGroupIDs />)
+  const ids = screen.getAllByRole('textbox', { name: 'Fixed group ID' })
+  expect(ids.map((input) => input.getAttribute('value'))).toEqual([
+    'default',
+    'vip',
+  ])
+  for (const input of ids) expect(input).toHaveAttribute('readonly')
+  expect(
+    screen.queryByRole('button', { name: /^Add group$/ })
+  ).not.toBeInTheDocument()
+  const pricingPanel = screen.getByRole('tabpanel', { name: 'Pricing groups' })
+  expect(
+    within(pricingPanel).getByRole('button', { name: 'Delete' })
+  ).toBeVisible()
+  const multiplier = within(pricingPanel).getAllByRole('spinbutton', {
+    name: 'Ratio',
+  })[0]
+  fireEvent.change(multiplier, { target: { value: '0.5' } })
+  expect(multiplier).toHaveValue(0.5)
+  expect(ids[0]).toHaveValue('default')
+  fireEvent.click(within(pricingPanel).getByRole('button', { name: 'Delete' }))
+  expect(
+    screen.getAllByRole('textbox', { name: 'Fixed group ID' })
+  ).toHaveLength(1)
 })

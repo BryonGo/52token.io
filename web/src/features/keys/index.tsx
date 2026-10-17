@@ -24,6 +24,7 @@ import { ApiKeysDialogs } from './components/api-keys-dialogs'
 import { ApiKeysPrimaryButtons } from './components/api-keys-primary-buttons'
 import { ApiKeysProvider } from './components/api-keys-provider'
 import { ApiKeysTable } from './components/api-keys-table'
+import { KeyProjects } from './components/key-projects'
 
 export function ApiKeys() {
   const { t } = useTranslation()
@@ -35,7 +36,12 @@ export function ApiKeys() {
           <ApiKeysPrimaryButtons />
         </SectionPageLayout.Actions>
         <SectionPageLayout.Content>
-          <ApiKeysTable />
+          <div className='flex min-h-0 flex-1 flex-col gap-4 overflow-auto lg:flex-row'>
+            <KeyProjects />
+            <div className='flex min-w-0 flex-1 flex-col gap-4'>
+              <ApiKeysTable />
+            </div>
+          </div>
         </SectionPageLayout.Content>
       </SectionPageLayout>
 

@@ -38,6 +38,25 @@ func newAdvancedCustomModelListChannel(baseURL string, key string, upstreamPath 
 	return channel
 }
 
+func TestFetchVolcengineModelsNormalizesAPIRoot(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v3/models", r.URL.Path)
+		assert.Equal(t, "Bearer test-key", r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"dola-seedream-5-0-pro-260628"}]}`))
+	}))
+	defer server.Close()
+	for _, suffix := range []string{"", "/", "/api/v3", "/api/v3/", "/api/v3/api/v3/"} {
+		t.Run(suffix, func(t *testing.T) {
+			baseURL := server.URL + suffix
+			channel := &model.Channel{Type: constant.ChannelTypeVolcEngine, Key: "test-key", BaseURL: &baseURL}
+			models, err := fetchChannelUpstreamModelIDs(channel)
+			require.NoError(t, err)
+			assert.Equal(t, []string{"dola-seedream-5-0-pro-260628"}, models)
+		})
+	}
+}
+
 func TestParseOpenAIModelIDsStrictResponseContract(t *testing.T) {
 	tests := []struct {
 		name      string

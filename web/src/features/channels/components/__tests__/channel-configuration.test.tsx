@@ -470,6 +470,61 @@ test('selecting a plugin opens a prefilled channel and creates its explicit bind
   expect(screen.getByLabelText('API Key *')).toHaveValue('')
 })
 
+test('creating an 88API relay prefills its API host and saves a legacy channel without a plugin binding', async () => {
+  const post = vi
+    .spyOn(api, 'post')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness />)
+  await user.click(screen.getByRole('tab', { name: 'Relay providers' }))
+  await user.click(screen.getByRole('option', { name: '88API Built-in #66' }))
+  expect(screen.getByLabelText('Name *')).toHaveValue('88API')
+  expect(screen.getByLabelText(/Base URL/)).toHaveValue('https://api.88api.ai')
+  fireEvent.change(screen.getByLabelText('API Key *'), {
+    target: { value: 'test-key' },
+  })
+  await user.click(
+    screen.getByRole('combobox', { name: 'Select models or add custom ones' })
+  )
+  await user.click(await screen.findByRole('option', { name: 'custom-model' }))
+  await user.keyboard('{Escape}')
+  await user.click(screen.getByRole('button', { name: 'Create Channel' }))
+  await waitFor(() => expect(post).toHaveBeenCalled())
+  const payload = post.mock.calls[0]?.[1] as { channel: { setting: string } }
+  expect(payload).toMatchObject({
+    channel: {
+      name: '88API',
+      type: 66,
+      base_url: 'https://api.88api.ai',
+      models: 'custom-model',
+    },
+  })
+  expect(
+    JSON.parse(payload.channel.setting || '{}').task_plugin_key
+  ).toBeFalsy()
+})
+
+test('selecting the 88API relay preset preserves an existing custom address and model', async () => {
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  await user.click(screen.getByRole('button', { name: 'Change provider' }))
+  await user.click(screen.getByRole('tab', { name: 'Relay providers' }))
+  await user.click(screen.getByRole('option', { name: '88API Built-in #66' }))
+  expect(screen.getByLabelText(/Base URL/)).toHaveValue('https://saved.example')
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  expect(put.mock.calls[0]?.[1]).toMatchObject({
+    id: 42,
+    type: 66,
+    base_url: 'https://saved.example',
+    models: 'custom-model',
+  })
+})
+
 test('changing plugins preserves credentials and custom settings while applying existing model and address rules', async () => {
   const user = userEvent.setup()
   render(<ConfigurationHarness />)
@@ -645,36 +700,92 @@ test('plugin loading failure can be retried while built-in providers remain sele
   expect(await screen.findByRole('option', { name: /Video A/ })).toBeVisible()
 })
 
-test('creating a migrated provider uses its plugin binding instead of the legacy type', async () => {
-  pluginOptions = [soraPlugin]
-  const post = vi
-    .spyOn(api, 'post')
-    .mockResolvedValue({ data: { success: true } })
-  const user = userEvent.setup()
-  render(<ConfigurationHarness />)
-  const plugin = await screen.findByRole('option', { name: 'Sora Plugin sora' })
-  expect(
-    screen.queryByRole('option', { name: 'Sora Built-in #55' })
-  ).not.toBeInTheDocument()
-  await user.click(plugin)
-  fireEvent.change(screen.getByLabelText('API Key *'), {
-    target: { value: 'test-key' },
-  })
-  await user.click(screen.getByRole('button', { name: 'Create Channel' }))
+test('editing an OpenAI-compatible text channel exposes its separate account balance settings', async () => {
+  editingChannel.setting = JSON.stringify({ super_key_user_id: 2752 })
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  const token = await screen.findByLabelText('Upstream account access token')
+  expect(token).toHaveAttribute('type', 'password')
+  expect(token).toHaveValue('')
   await waitFor(() =>
-    expect(post).toHaveBeenCalledWith(
-      '/api/channel',
-      expect.objectContaining({
-        channel: expect.objectContaining({ type: 61 }),
-      }),
-      expect.anything()
-    )
+    expect(screen.getByLabelText('Upstream account user ID')).toHaveValue(2752)
   )
-  const payload = post.mock.calls[0]?.[1] as { channel: { setting: string } }
-  expect(JSON.parse(payload.channel.setting)).toMatchObject({
-    task_plugin_key: 'sora',
-  })
 })
+
+test.each([
+  soraPlugin,
+  {
+    key: 'byteplus',
+    name: 'BytePlus',
+    baseUrl: 'https://ark.ap-southeast.bytepluses.com',
+    models: ['seedream-4-5-251128'],
+  },
+  {
+    key: 'newtoken',
+    name: 'NewToken',
+    providerKind: 'relay' as const,
+    baseUrl: 'https://newtoken.club',
+    models: ['dola-seedream-5-0-pro-260628-1k'],
+  },
+])(
+  'creating $name from its category saves its own binding, model and default address',
+  async (provider) => {
+    pluginOptions = [provider]
+    const post = vi
+      .spyOn(api, 'post')
+      .mockResolvedValue({ data: { success: true } })
+    const user = userEvent.setup()
+    render(<ConfigurationHarness />)
+    await user.click(
+      screen.getByRole('tab', {
+        name: provider.key === 'newtoken' ? 'Relay providers' : 'Plugins',
+      })
+    )
+    const plugin = await screen.findByRole('option', {
+      name: `${provider.name} Plugin ${provider.key}`,
+    })
+    await user.click(plugin)
+    fireEvent.change(screen.getByLabelText('API Key *'), {
+      target: { value: 'test-key' },
+    })
+    if (provider.key === 'newtoken') {
+      fireEvent.change(screen.getByLabelText('Upstream account access token'), {
+        target: { value: 'account-fixture' },
+      })
+      fireEvent.change(screen.getByLabelText('Upstream account user ID'), {
+        target: { value: '2752' },
+      })
+    } else {
+      expect(
+        screen.queryByLabelText('Upstream account access token')
+      ).not.toBeInTheDocument()
+    }
+    await user.click(screen.getByRole('button', { name: 'Create Channel' }))
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith(
+        '/api/channel',
+        expect.objectContaining({
+          channel: expect.objectContaining({
+            type: 61,
+            name: provider.name,
+            base_url: provider.baseUrl,
+            models: provider.models.join(','),
+          }),
+        }),
+        expect.anything()
+      )
+    )
+    const payload = post.mock.calls[0]?.[1] as { channel: { setting: string } }
+    expect(JSON.parse(payload.channel.setting)).toMatchObject({
+      task_plugin_key: provider.key,
+    })
+    if (provider.key === 'newtoken') {
+      expect(JSON.parse(payload.channel.setting)).toMatchObject({
+        super_key: 'account-fixture',
+        super_key_user_id: 2752,
+      })
+    }
+  }
+)
 
 test.each(['create', 'edit'])(
   '%s selects plugin models in the shared model dialog while preserving the built-in connection',

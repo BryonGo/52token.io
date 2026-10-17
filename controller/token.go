@@ -37,6 +37,7 @@ type tokenRequest struct {
 	AutoGroups tokenAutoGroupsInput `json:"auto_groups"`
 	// 指针区分“未传”和显式 false：新建时未传即开启，更新时未传则保留原值。
 	AllowUserQuotaQuery *bool `json:"allow_user_quota_query"`
+	ProjectID           *int  `json:"project_id"`
 }
 
 type tokenResponse struct {
@@ -132,12 +133,15 @@ func setTokenAutoGroups(c *gin.Context, token *model.Token, groups []string) boo
 func GetAllTokens(c *gin.Context) {
 	userId := c.GetInt("id")
 	pageInfo := common.GetPageQuery(c)
-	tokens, err := model.GetAllUserTokens(userId, pageInfo.GetStartIdx(), pageInfo.GetPageSize())
+	projects, ok := tokenProjectFilter(c)
+	if !ok {
+		return
+	}
+	tokens, total, err := model.SearchUserTokens(userId, "", "", pageInfo.GetStartIdx(), pageInfo.GetPageSize(), projects...)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	total, _ := model.CountUserTokens(userId)
 	pageInfo.SetTotal(int(total))
 	pageInfo.SetItems(buildMaskedTokenResponses(tokens))
 	common.ApiSuccess(c, pageInfo)
@@ -150,7 +154,11 @@ func SearchTokens(c *gin.Context) {
 
 	pageInfo := common.GetPageQuery(c)
 
-	tokens, total, err := model.SearchUserTokens(userId, keyword, token, pageInfo.GetStartIdx(), pageInfo.GetPageSize())
+	projects, ok := tokenProjectFilter(c)
+	if !ok {
+		return
+	}
+	tokens, total, err := model.SearchUserTokens(userId, keyword, token, pageInfo.GetStartIdx(), pageInfo.GetPageSize(), projects...)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -341,6 +349,16 @@ func AddToken(c *gin.Context) {
 		token.CrossGroupRetry = false
 		_ = token.SetAutoGroups(nil)
 	}
+	if !validateTokenGroupSelection(c, token.Group) {
+		return
+	}
+	if request.ProjectID != nil {
+		token.ProjectID = *request.ProjectID
+	}
+	if err := model.ValidateTokenProject(c.GetInt("id"), token.ProjectID); err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	key, err := common.GenerateKey()
 	if err != nil {
 		common.ApiErrorT(c, "Failed to generate token")
@@ -349,6 +367,7 @@ func AddToken(c *gin.Context) {
 	}
 	cleanToken := model.Token{
 		UserId:             c.GetInt("id"),
+		ProjectID:          token.ProjectID,
 		Name:               token.Name,
 		Key:                key,
 		CreatedTime:        common.GetTimestamp(),
@@ -449,6 +468,16 @@ func UpdateToken(c *gin.Context) {
 		cleanToken.Status = token.Status
 	} else {
 		// If you add more fields, please also update token.Update()
+		if token.Group != cleanToken.Group && !validateTokenGroupSelection(c, token.Group) {
+			return
+		}
+		if request.ProjectID != nil {
+			if err := model.ValidateTokenProject(userId, *request.ProjectID); err != nil {
+				common.ApiError(c, err)
+				return
+			}
+			cleanToken.ProjectID = *request.ProjectID
+		}
 		cleanToken.Name = token.Name
 		cleanToken.ExpiredTime = token.ExpiredTime
 		cleanToken.RemainQuota = token.RemainQuota
@@ -494,6 +523,7 @@ func UpdateToken(c *gin.Context) {
 				(previous.AllowIps != nil && cleanToken.AllowIps != nil && *previous.AllowIps != *cleanToken.AllowIps)},
 			{"allow_user_quota_query", previous.AllowUserQuotaQuery != cleanToken.AllowUserQuotaQuery},
 			{"group", previous.Group != cleanToken.Group},
+			{"project_id", previous.ProjectID != cleanToken.ProjectID},
 			{"cross_group_retry", previous.CrossGroupRetry != cleanToken.CrossGroupRetry},
 			{"auto_groups", previous.AutoGroups != cleanToken.AutoGroups},
 		} {
@@ -572,4 +602,88 @@ func GetTokenKeysBatch(c *gin.Context) {
 	params["returned_ids"] = returnedIDs
 	common.SetContextKey(c, constant.ContextKeyTokenAuditSucceeded, true)
 	common.ApiSuccess(c, gin.H{"keys": keysMap})
+}
+
+func validateTokenGroupSelection(c *gin.Context, group string) bool {
+	if group == "" {
+		return true
+	}
+	userGroup, err := getTokenRequestUserGroup(c)
+	if err != nil {
+		common.ApiError(c, err)
+		return false
+	}
+	allowed := service.IsUserSelectableGroup(userGroup, group)
+	if group == "auto" {
+		allowed = service.GroupInUserUsableGroups(userGroup, group)
+	}
+	if !allowed {
+		common.ApiErrorT(c, "Group is unavailable or unauthorized")
+		return false
+	}
+	return true
+}
+func tokenProjectFilter(c *gin.Context) ([]int, bool) {
+	raw, ok := c.GetQuery("project_id")
+	if !ok {
+		return nil, true
+	}
+	id, err := strconv.Atoi(raw)
+	if err != nil {
+		common.ApiErrorT(c, "Project is unavailable or unauthorized")
+		return nil, false
+	}
+	if err := model.ValidateTokenProject(c.GetInt("id"), id); err != nil {
+		common.ApiError(c, err)
+		return nil, false
+	}
+	return []int{id}, true
+}
+func GetTokenProjects(c *gin.Context) {
+	projects, err := model.ListTokenProjects(c.GetInt("id"))
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, projects)
+}
+func SaveTokenProject(c *gin.Context) {
+	var input struct {
+		ID   int    `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	project, err := model.SaveTokenProject(c.GetInt("id"), input.ID, input.Name)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	params := tokenAuditParams(c)
+	params["id"], params["name"] = project.ID, project.Name
+	common.SetContextKey(c, constant.ContextKeyTokenAuditSucceeded, true)
+	common.ApiSuccess(c, project)
+}
+func GetTokenProjectUsage(c *gin.Context) {
+	ids, ok := tokenProjectFilter(c)
+	if !ok {
+		return
+	}
+	days, err := strconv.Atoi(c.DefaultQuery("days", "30"))
+	if err != nil || (days != 1 && days != 7 && days != 30) {
+		common.ApiErrorT(c, "Invalid usage period")
+		return
+	}
+	var projectID *int
+	if len(ids) == 1 {
+		projectID = &ids[0]
+	}
+	usage, err := model.GetTokenProjectUsage(c.GetInt("id"), projectID, days)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, usage)
 }

@@ -80,12 +80,14 @@ type GroupRatioFormProps = {
   form: UseFormReturn<GroupFormValues>
   onSave: (values: GroupFormValues) => Promise<void>
   isSaving: boolean
+  lockGroupIDs?: boolean
 }
 
 export const GroupRatioForm = memo(function GroupRatioForm({
   form,
   onSave,
   isSaving,
+  lockGroupIDs = false,
 }: GroupRatioFormProps) {
   const { t } = useTranslation()
   const values = useWatch({ control: form.control })
@@ -165,6 +167,7 @@ export const GroupRatioForm = memo(function GroupRatioForm({
         </SettingsPageActionsPortal>
         {editMode === 'visual' ? (
           <GroupRatioVisualEditor
+            lockGroupIDs={lockGroupIDs}
             section={section}
             onSectionChange={setSection}
             groupRatio={values.GroupRatio ?? ''}

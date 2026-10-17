@@ -17,7 +17,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { afterEach, describe, expect, test } from 'vitest'
+import userEvent from '@testing-library/user-event'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 
 const { createInstance } = await import('i18next')
 const { I18nextProvider, initReactI18next } = await import('react-i18next')
@@ -52,6 +53,16 @@ function installApiFixtures(createdPayloads: Array<Record<string, unknown>>) {
     switch (url) {
       case '/api/status':
         return { data: { data: { default_use_auto_group: true } } }
+      case '/api/token/projects':
+        return {
+          data: {
+            success: true,
+            data: [
+              { id: 10, name: 'Product A' },
+              { id: 20, name: 'Product B' },
+            ],
+          },
+        }
       case '/api/user/models':
         return { data: { success: true, data: [] } }
       case '/api/user/self/groups':
@@ -194,6 +205,7 @@ function selectComboboxOption(
 }
 
 afterEach(() => {
+  vi.restoreAllMocks()
   apiClient.get = originalGet
   apiClient.post = originalPost
   localStorage.clear()
@@ -298,4 +310,67 @@ describe('API keys mutate drawer user quota query switch', () => {
     await waitFor(() => expect(createdPayloads).toHaveLength(1))
     expect(createdPayloads[0]?.allow_user_quota_query).toBe(false)
   })
+})
+
+test('editing an old key can change its project without changing its group or quota', async () => {
+  const { apiKeySchema } = await import('../../types')
+  const key = apiKeySchema.parse({
+    id: 42,
+    name: 'legacy key',
+    key: 'masked',
+    project_id: 10,
+    group: 'default',
+    status: 1,
+    remain_quota: 0,
+    used_quota: 1234,
+    unlimited_quota: true,
+    expired_time: -1,
+    created_time: 1,
+    accessed_time: 1,
+    model_limits_enabled: false,
+  })
+  installApiFixtures([])
+  const fixturesGet = apiClient.get
+  apiClient.get = async (url) =>
+    url === '/api/token/42'
+      ? { data: { success: true, data: key } }
+      : fixturesGet(url)
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
+  renderedDrawer = { queryClient }
+  render(
+    <QueryClientProvider client={queryClient}>
+      <I18nextProvider i18n={i18n}>
+        <ApiKeysProvider>
+          <ApiKeysMutateDrawer
+            open
+            currentRow={key}
+            onOpenChange={() => undefined}
+          />
+        </ApiKeysProvider>
+      </I18nextProvider>
+    </QueryClientProvider>
+  )
+  const project = await screen.findByRole('combobox', { name: 'Project' })
+  await waitFor(() => expect(project).toHaveValue('Product A'))
+  const user = userEvent.setup()
+  await user.click(project)
+  await user.click(await screen.findByRole('option', { name: 'Product B' }))
+  fireEvent.click(findButton('Save changes', true))
+  await waitFor(() =>
+    expect(put).toHaveBeenCalledWith(
+      '/api/token/',
+      expect.objectContaining({
+        id: 42,
+        project_id: 20,
+        group: 'default',
+        unlimited_quota: true,
+        remain_quota: 0,
+      })
+    )
+  )
 })

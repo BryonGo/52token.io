@@ -42,6 +42,7 @@ export type TaskPluginRoute = {
 }
 
 export type TaskPluginMeta = {
+  providerKind?: 'provider' | 'relay'
   sortPriority?: number
   website?: string
   apiVersion: number

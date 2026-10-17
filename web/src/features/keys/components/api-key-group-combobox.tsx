@@ -36,6 +36,7 @@ import {
 } from '@/components/ui/popover'
 import { useMediaQuery } from '@/hooks'
 import { cn } from '@/lib/utils'
+import { useGroupLabelStore } from '@/stores/group-label-store'
 
 import {
   AUTO_GROUP_FRAME_CLASS_NAME,
@@ -59,17 +60,35 @@ type ApiKeyGroupComboboxProps = {
 }
 
 export function ApiKeyGroupCombobox({
-  options,
+  options: inputOptions,
   value,
   onValueChange,
   placeholder,
   disabled,
 }: ApiKeyGroupComboboxProps) {
   const { t } = useTranslation()
+  const labels = useGroupLabelStore((s) => s.labels)
+  const options = useMemo(
+    () =>
+      inputOptions.map((option) => ({
+        ...option,
+        label: labels[option.value]?.name || option.label,
+      })),
+    [inputOptions, labels]
+  )
   const [open, setOpen] = useState(false)
   const [searchValue, setSearchValue] = useState('')
   const shouldReduceMotion = useMediaQuery('(prefers-reduced-motion: reduce)')
-  const selectedOption = options.find((option) => option.value === value)
+  const selectedOption =
+    options.find((option) => option.value === value) ??
+    (value
+      ? {
+          value,
+          label: labels[value]?.name || value,
+          desc: undefined,
+          ratio: undefined,
+        }
+      : undefined)
   const isAutoSelected = selectedOption?.value === 'auto'
 
   const filteredOptions = useMemo(() => {

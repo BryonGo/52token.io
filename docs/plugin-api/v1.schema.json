@@ -6,6 +6,7 @@
   "additionalProperties": false,
   "required": ["apiVersion", "key", "name", "version", "author", "models", "fetchMode"],
   "properties": {
+    "providerKind": {"enum": ["provider", "relay"], "default": "provider", "description": "Display classification for channel selection; relay providers appear under Relay providers. Does not change routing or billing."},
     "sortPriority": {"type": "integer", "minimum": -2147483648, "maximum": 2147483647, "default": 0},
     "website": {"oneOf": [{"const": ""}, {"type": "string", "format": "uri", "pattern": "^[Hh][Tt][Tt][Pp][Ss]://[^/@?#\\s]+(?:[/?#]|$)"}], "description": "Absolute HTTPS URL with a valid ASCII hostname (use punycode for internationalized domains) and no credentials; validated by the host."},
     "apiVersion": {"const": 1}, "key": {"type": "string"}, "name": {"type": "string"}, "icon": {"type": "string", "maxLength": 128}, "description": {"$ref": "#/$defs/localizedText"}, "version": {"type": "string"},

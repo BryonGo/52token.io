@@ -306,6 +306,11 @@ function KeysPage() {
 async function renderKeysPage(status = 1, overrides: Partial<ApiKey> = {}) {
   let currentKey = { ...key, status, ...overrides }
   vi.mocked(api.get).mockImplementation(async (url) => {
+    if (url === '/api/token/projects') {
+      return {
+        data: { success: true, data: [{ id: 10, name: 'Image project' }] },
+      }
+    }
     if (url.startsWith('/api/token/')) {
       return {
         data: { success: true, data: { items: [currentKey], total: 1 } },
@@ -524,4 +529,16 @@ it('keeps mobile quota readable and opens complete model and IP restrictions by 
   details = await screen.findByRole('dialog')
   expect(within(details).getByText('192.0.2.1')).toBeVisible()
   expect(within(details).getByText('2001:db8::1')).toBeVisible()
+})
+
+it('shows the owning project in the all-project key list', async () => {
+  await renderKeysPage(1, { project_id: 10 })
+  expect(
+    await screen.findByRole('columnheader', { name: 'Key project' })
+  ).toBeInTheDocument()
+  expect(await screen.findByText('Image project')).toBeInTheDocument()
+})
+it('labels a legacy key without a project as unassigned', async () => {
+  await renderKeysPage(1, { project_id: 0 })
+  expect(await screen.findByText('Unassigned')).toBeInTheDocument()
 })

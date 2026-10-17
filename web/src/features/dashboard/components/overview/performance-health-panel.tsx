@@ -18,10 +18,12 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useQuery } from '@tanstack/react-query'
 import { Gauge, HeartPulse, Timer } from 'lucide-react'
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { StaticDataTable } from '@/components/data-table/static/static-data-table'
 import { IconBadge, type IconBadgeTone } from '@/components/ui/icon-badge'
+import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { getPerfMetricsSummary } from '@/features/performance-metrics/api'
 import {
@@ -31,8 +33,12 @@ import {
   getSuccessRateDotClass,
   getSuccessRateTextClass,
 } from '@/features/performance-metrics/lib/format'
+import { toIntlLocale } from '@/i18n/languages'
+import { formatNumber, formatTimestamp } from '@/lib/format'
 import { requireServerSuccess } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
+
+import { getModelHealth, type ModelHealthRow } from '../../api'
 
 const PERFORMANCE_WINDOW_HOURS = 24
 const TOP_MODEL_LIMIT = 6
@@ -145,6 +151,108 @@ export function PerformanceHealthPanel() {
           )
         )}
       </div>
+
+      <ModelConnectivityTable />
+    </section>
+  )
+}
+
+function ModelConnectivityTable() {
+  const { t, i18n } = useTranslation()
+  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
+  const [search, setSearch] = useState('')
+  const query = useQuery({
+    queryKey: ['model-health'],
+    queryFn: async () => requireServerSuccess(await getModelHealth()),
+    refetchInterval: 60000,
+    retry: false,
+  })
+  const rows = (query.data?.data || []).filter((row) =>
+    `${row.model} ${row.channel_name} ${row.groups.map((g) => g.name).join(' ')}`
+      .toLowerCase()
+      .includes(search.toLowerCase())
+  )
+  const states = {
+    unknown: t('Not checked'),
+    unverified: t('No free model check'),
+    healthy: t('Healthy'),
+    unhealthy: t('Unhealthy'),
+    interface_only: t('API reachable; generation unverified'),
+    stale: t('Check expired'),
+    disabled: t('Unavailable'),
+  }
+  const columns = [
+    {
+      id: 'channel',
+      header: t('Channel'),
+      cell: (r: ModelHealthRow) => r.channel_name,
+    },
+    {
+      id: 'group',
+      header: t('Group'),
+      cell: (r: ModelHealthRow) => r.groups.map((g) => g.name).join(', '),
+    },
+    {
+      id: 'model',
+      header: t('Model ID'),
+      cell: (r: ModelHealthRow) => r.model,
+    },
+    {
+      id: 'rate',
+      header: t('Probe success rate'),
+      cell: (r: ModelHealthRow) =>
+        r.success_rate == null
+          ? '—'
+          : `${formatNumber(r.success_rate * 100, locale)}%`,
+    },
+    {
+      id: 'latency',
+      header: t('Response (ms)'),
+      cell: (r: ModelHealthRow) =>
+        r.checked_at ? formatNumber(r.latency_ms, locale) : '—',
+    },
+    {
+      id: 'state',
+      header: t('Health'),
+      cell: (r: ModelHealthRow) => states[r.state],
+    },
+    {
+      id: 'checked',
+      header: t('Last checked'),
+      cell: (r: ModelHealthRow) =>
+        r.checked_at ? formatTimestamp(r.checked_at) : '—',
+    },
+  ]
+  return (
+    <section
+      aria-label={t('Model connectivity')}
+      className='space-y-3 border-t p-4 sm:p-5'
+    >
+      <h4 className='text-sm font-semibold'>{t('Model connectivity')}</h4>
+      <p className='text-muted-foreground text-xs'>
+        {t(
+          'Chat is checked at most once every 30 minutes. Images and videos use free API discovery only. Rates describe recorded checks, not guaranteed generation availability.'
+        )}
+      </p>
+      <Input
+        aria-label={t('Filter model connectivity')}
+        placeholder={t('Filter model connectivity')}
+        value={search}
+        onChange={(event) => setSearch(event.target.value)}
+      />
+      {query.isPending && <Skeleton className='h-24 w-full' />}
+      {query.isError && (
+        <p role='alert'>{t('Failed to load model connectivity')}</p>
+      )}
+      {!query.isPending && !query.isError && (
+        <StaticDataTable
+          className='max-h-96 overflow-y-auto'
+          columns={columns}
+          data={rows}
+          getRowKey={(row) => `${row.channel_id}:${row.model}`}
+          emptyContent={t('No matching models')}
+        />
+      )}
     </section>
   )
 }

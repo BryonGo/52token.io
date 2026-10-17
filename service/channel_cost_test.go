@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -71,6 +72,22 @@ func TestDeepSeekCostOfficialDocumentAndCalendar(t *testing.T) {
 	assert.Equal(t, channelcost.Rates{Input: 9, Output: 27, CacheRead: 0.3, CacheWrite: 9, CacheWrite1h: 9}, *prices["deepseek-v4-pro"].Peak)
 	_, err = parseDeepSeekCost([]byte("<table><tr><td>$0.15</td></tr></table>"))
 	require.Error(t, err)
+	usdHTML := []byte(`<table><tr><th>MODEL</th><th>deepseek-flash(1)</th><th>deepseek-v4-pro</th></tr><tr><td>1M INPUT TOKENS (CACHE HIT)</td><td>OFF-PEAK</td><td>$0.003</td><td>$0.022</td></tr><tr><td>PEAK</td><td>$0.006</td><td>$0.044</td></tr><tr><td>1M INPUT TOKENS (CACHE MISS)</td><td>OFF-PEAK</td><td>$0.15</td><td>$0.66</td></tr><tr><td>PEAK</td><td>$0.3</td><td>$1.32</td></tr><tr><td>1M OUTPUT TOKENS</td><td>OFF-PEAK</td><td>$0.6</td><td>$1.98</td></tr><tr><td>PEAK</td><td>$1.2</td><td>$3.96</td></tr></table><p>Peak hours are 01:00 - 04:00 and 06:00 - 10:00 UTC, Monday through Friday, excluding Chinese public holidays.</p>`)
+	usdPrices, err := parseDeepSeekCostCurrency(usdHTML, "USD")
+	require.NoError(t, err)
+	assert.Equal(t, channelcost.Rates{Input: .15, Output: .6, CacheRead: .003, CacheWrite: .15, CacheWrite1h: .15}, usdPrices["deepseek-flash"].OffPeak)
+	assert.Equal(t, channelcost.Rates{Input: 1.32, Output: 3.96, CacheRead: .044, CacheWrite: 1.32, CacheWrite1h: 1.32}, *usdPrices["deepseek-v4-pro"].Peak)
+	_, err = parseDeepSeekCostCurrency(body, "USD")
+	require.Error(t, err, "a CNY table cannot be treated as USD")
+	_, err = parseDeepSeekCostCurrency(usdHTML, "CNY")
+	require.Error(t, err, "a USD table cannot be treated as CNY")
+	now := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+	usdSnapshot := channelcost.Snapshot{Fingerprint: "usd-official", SyncedAt: now.Unix(), GroupRatio: 1, Prices: usdPrices}
+	receipt, _, err := usdSnapshot.Resolve(&dto.ChannelCostSettings{Enabled: true, Source: "deepseek-usd", CreditsPerCNY: 1 / 6.69}, "deepseek-v4-pro", "usd-official", now, 1)
+	require.NoError(t, err)
+	assert.InDelta(t, .66*6.69, receipt.CNY.Input, 1e-12)
+	assert.InDelta(t, 1.98*6.69, receipt.CNY.Output, 1e-12)
+
 	for _, tc := range []struct {
 		at   string
 		peak bool
@@ -242,7 +259,7 @@ func TestMappedPriceSourceAndHappyContextTiers(t *testing.T) {
 }
 func TestPriceSourceRejectsUnsupportedOrInvalidPrices(t *testing.T) {
 	source := channelcost.DefaultSources()["happyapi"]
-	for _, expression := range []string{`tier("bad", p * -2 + c * 12)`, `tier("bad", p * 2 + c * 12) * header("factor")`, `p > 272000 ? tier("bad", p * 2 + c * 12) : tier("other", p * 4 + c * 18)`} {
+	for _, expression := range []string{`tier("bad", p * -2 + c * 12)`, `tier("bad", p * 2 + c * 12) * header("factor")`, `len > 272000 ? tier("bad", p * 2 + c * 12) : tier("other", p / 0)`} {
 		raw, err := common.Marshal(map[string]any{"success": true, "group_ratio": map[string]float64{"default": 1}, "data": []map[string]any{{"model_name": "m", "quota_type": 0, "enable_groups": []string{"default"}, "billing_mode": "tiered_expr", "billing_expr": expression}}})
 		require.NoError(t, err)
 		result, err := ParsePriceSource(raw, source, "default", 500000)
@@ -250,11 +267,86 @@ func TestPriceSourceRejectsUnsupportedOrInvalidPrices(t *testing.T) {
 		assert.Empty(t, result.Prices)
 		assert.NotEmpty(t, result.Errors["m"])
 	}
+	for _, ratio := range []float64{-1, math.NaN(), math.Inf(1), 0.0000001, 1000001} {
+		source.DefaultCreditsPerCNY = ratio
+		require.Error(t, source.Validate())
+	}
+	source.DefaultCreditsPerCNY = 1
+	require.NoError(t, source.Validate())
+	source.DefaultCreditsPerCNY = 0 // Existing sources do not supply a default.
+	require.NoError(t, source.Validate())
 	source.URL = ""
 	require.Error(t, source.Validate())
 	source = channelcost.DefaultSources()["happyapi"]
 	source.Fields.Input = "data.#(secret)"
 	require.Error(t, source.Validate())
+}
+
+func TestProtectedPriceSourceCredentialsStayOnBoundEndpoints(t *testing.T) {
+	requests := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		assert.Equal(t, "Bearer fixture-source-token", r.Header.Get("Authorization"))
+		assert.Equal(t, "2752", r.Header.Get("New-Api-User"))
+		if r.URL.Path == "/redirect" {
+			w.Header().Set("Location", "/must-not-receive-token")
+			w.WriteHeader(http.StatusFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":[{"id":"m","input":2,"output":4}]}`))
+	}))
+	defer server.Close()
+	source := channelcost.Source{ID: "protected-test", Name: "Protected", Enabled: true, Format: "json", URL: server.URL + "/pricing", ChannelOrigin: server.URL, UnitTokens: 1e6, InputScale: 1, Fields: channelcost.SourceFields{Items: "data", Model: "id", Input: "input", Output: "output", Success: "success"}}
+	credential := model.PriceSourceCredential{Token: "fixture-source-token", UserID: 2752, PricingURL: source.URL}
+	raw, err := common.Marshal(credential)
+	require.NoError(t, err)
+	key := "channel_price_source." + source.ID + ".Secret"
+	common.OptionMapRWMutex.Lock()
+	if common.OptionMap == nil {
+		common.OptionMap = map[string]string{}
+	}
+	previous, existed := common.OptionMap[key]
+	common.OptionMap[key] = string(raw)
+	common.OptionMapRWMutex.Unlock()
+	oldClient := channelCostHTTP
+	client := *oldClient
+	client.Transport = server.Client().Transport
+	channelCostHTTP = &client
+	defer func() {
+		channelCostHTTP = oldClient
+		common.OptionMapRWMutex.Lock()
+		if existed {
+			common.OptionMap[key] = previous
+		} else {
+			delete(common.OptionMap, key)
+		}
+		common.OptionMapRWMutex.Unlock()
+	}()
+	parsed, err := FetchPriceSource(t.Context(), source, "")
+	require.NoError(t, err)
+	assert.Equal(t, 2.0, parsed.Prices["m"].OffPeak.Input)
+	assert.Equal(t, 1, requests)
+	changed := source
+	changed.URL = server.URL + "/other"
+	_, err = FetchPriceSource(t.Context(), changed, "")
+	require.Error(t, err)
+	assert.Equal(t, 1, requests, "a preview URL edit must not forward a saved credential")
+	redirected := source
+	redirected.URL = server.URL + "/redirect"
+	_, err = FetchPriceSource(t.Context(), redirected, "", credential)
+	require.Error(t, err)
+	assert.Equal(t, 2, requests, "redirects must stop before forwarding credentials")
+	insecure := source
+	insecure.URL = "http://example.com/pricing"
+	_, err = FetchPriceSource(t.Context(), insecure, "", credential)
+	require.Error(t, err)
+	assert.Equal(t, 2, requests)
+	crossOrigin := source
+	crossOrigin.ChannelOrigin = "https://different-upstream.example"
+	_, err = FetchPriceSource(t.Context(), crossOrigin, "", credential)
+	require.ErrorContains(t, err, "bound origin")
+	assert.Equal(t, 2, requests)
 }
 
 func TestFixedUpstreamPricesNormalizeEveryRequestModel(t *testing.T) {
@@ -575,4 +667,97 @@ func TestSyncSub2APICostUsesAuthenticatedMultiplierAndPreservesLastSnapshot(t *t
 	assert.Nil(t, flat.Prices["m"].Peak)
 	reference.Reference.GroupRatio = 0
 	require.Error(t, reference.Validate())
+}
+
+// A video unit or a multiple-request display must never become a flat request charge.
+func TestPriceSourceFiltersKeepVideoUnitsDistinct(t *testing.T) {
+	source := channelcost.DefaultSources()["happyapi"]
+	source.AdvancedPricing = true
+	raw := []byte(`{"success":true,"group_ratio":{"default":1},"data":[{"model_name":"image","quota_type":1,"model_price":0.3,"request_price_display_unit":"request","request_price_units":1,"enable_groups":["default"]},{"model_name":"video","is_video_model":1,"quota_type":1,"model_price":1,"request_price_display_unit":"second","request_price_units":1,"enable_groups":["default"]},{"model_name":"batch","quota_type":1,"model_price":0.02,"request_price_display_unit":"request","request_price_units":4,"enable_groups":["default"]}]}`)
+	source.FilterField = "is_video_model"
+	source.FilterValue = "1"
+	source.FilterExclude = true
+	require.NoError(t, source.Validate())
+	parsed, err := ParsePriceSource(raw, source, "default", 500000)
+	require.NoError(t, err)
+	require.Len(t, parsed.Prices, 2)
+	require.Equal(t, .3, *parsed.Prices["image"].RequestPrice)
+	require.Equal(t, .08, *parsed.Prices["batch"].RequestPrice)
+	require.Equal(t, 4.0, parsed.Prices["batch"].ChargeUnit.Units)
+	require.Empty(t, parsed.Errors)
+	source.FilterExclude = false
+	parsed, err = ParsePriceSource(raw, source, "default", 500000)
+	require.NoError(t, err)
+	require.Len(t, parsed.Prices, 1)
+	require.Empty(t, parsed.Errors)
+	require.True(t, parsed.Prices["video"].Dynamic.Task)
+	legacy := source
+	legacy.AdvancedPricing = false
+	old, err := ParsePriceSource(raw, legacy, "default", 500000)
+	require.NoError(t, err)
+	require.Empty(t, old.Prices)
+	require.NotEmpty(t, old.Errors["video"], "unrelated existing sources keep their previous behavior")
+	source.FilterField = "is_video_model.#"
+	require.Error(t, source.Validate())
+}
+
+func TestComplexUpstreamExpressionsPreserveUnitsAndCNYCost(t *testing.T) {
+	source := channelcost.DefaultSources()["happyapi"]
+	source.AdvancedPricing = true
+	schema := map[string]any{"seconds": map[string]any{"type": "number", "unit": "second"}, "resolution": map[string]any{"enum": []string{"720p", "1080p"}}}
+	for _, tc := range []struct {
+		name, expression string
+		params           billingexpr.TokenParams
+		request          billingexpr.RequestInput
+		expected         float64
+		task             bool
+	}{
+		{"weekday peak", `weekday("Asia/Shanghai") >= 1 && weekday("Asia/Shanghai") <= 5 && hour("Asia/Shanghai") >= 9 && hour("Asia/Shanghai") < 12 ? tier("peak", p * 9 + c * 27 + cr * 0.3) : tier("idle", p * 4.5 + c * 13.5 + cr * 0.15)`, billingexpr.TokenParams{P: 1e6, C: 1e6, CR: 1e6}, billingexpr.RequestInput{Now: time.Date(2026, 10, 20, 2, 0, 0, 0, time.UTC)}, 36.3, false},
+		{"weekend idle", `weekday("Asia/Shanghai") >= 1 && weekday("Asia/Shanghai") <= 5 ? tier("peak",p*9+c*27) : tier("idle",p*4.5+c*13.5)`, billingexpr.TokenParams{P: 1e6, C: 1e6}, billingexpr.RequestInput{Now: time.Date(2026, 10, 17, 2, 0, 0, 0, time.UTC)}, 18, false},
+		{"context and cache", `param("cache") == "explicit" ? (len <= 256000 ? tier("short",p*2+c*8+cr*0.2+cc*2.5) : tier("long",p*6+c*24+cr*0.6+cc*7.5)) : tier("implicit",p*2+c*8+cr*.4+cc*2)`, billingexpr.TokenParams{P: 100, C: 300, Len: 300000, CR: 299900, CC: 10}, billingexpr.RequestInput{Body: []byte(`{"cache":"explicit"}`)}, .187815, false},
+		{"image quantities", `tier("image",fixed(0.2))*image_count`, billingexpr.TokenParams{}, billingexpr.RequestInput{ImageCount: new(3)}, .6, false},
+		{"per-second resolution", `u("resolution") == "720p" ? tier("720p",u("seconds")*1) : tier("1080p",u("seconds")*2.48)`, billingexpr.TokenParams{}, billingexpr.RequestInput{Usage: map[string]any{"seconds": 5.0, "resolution": "1080p"}}, 12.4, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			row := map[string]any{"model_name": "m", "billing_mode": "tiered_expr", "billing_expr": tc.expression, "billing_usage_schema": schema, "enable_groups": []string{"discount"}}
+			raw, err := common.Marshal(map[string]any{"success": true, "group_ratio": map[string]float64{"discount": .5}, "data": []any{row}})
+			require.NoError(t, err)
+			parsed, err := ParsePriceSource(raw, source, "discount", 500000)
+			require.NoError(t, err)
+			require.Empty(t, parsed.Errors)
+			require.NotNil(t, parsed.Prices["m"].Dynamic)
+			now := time.Now()
+			snapshot := channelcost.Snapshot{Fingerprint: "f", SyncedAt: now.Unix(), GroupRatio: parsed.GroupRatio, Prices: parsed.Prices}
+			receipt, expression, err := snapshot.Resolve(&dto.ChannelCostSettings{Enabled: true, Source: "happyapi", UpstreamGroup: "discount", CreditsPerCNY: 5}, "m", "f", now, 7)
+			require.NoError(t, err)
+			require.True(t, receipt.Dynamic)
+			assert.Equal(t, tc.task, receipt.TaskUsageBilling)
+			amount, _, err := billingexpr.RunExprWithRequest(expression, tc.params, tc.request)
+			require.NoError(t, err)
+			divisor := 1e6
+			if tc.task {
+				divisor = 1
+			}
+			assert.InDelta(t, tc.expected*.5/5, amount/divisor*7, 1e-10)
+			settled, err := billingexpr.ComputeTieredQuotaWithRequest(&billingexpr.BillingSnapshot{ExprString: expression, ExprHash: billingexpr.ExprHashString(expression), GroupRatio: 1, QuotaPerUnit: 500000, TaskUsageBilling: tc.task, ProcurementCost: true}, tc.params, tc.request)
+			require.NoError(t, err)
+			assert.Equal(t, common.QuotaFromFloat(tc.expected*.5/5/7*500000), settled.ActualQuotaAfterGroup)
+			if !tc.task && billingexpr.UsesFixedPricing(expression) {
+				taskExpr, err := channelcost.TaskExpression(expression)
+				require.NoError(t, err)
+				r, _, err := billingexpr.RunExprWithRequest(taskExpr, billingexpr.TokenParams{}, billingexpr.RequestInput{Usage: map[string]any{"image_count": 3.0}})
+				require.NoError(t, err)
+				assert.InDelta(t, tc.expected*.5/5, r*7, 1e-10)
+			}
+		})
+	}
+	// Unsafe branches remain invalid even when a different branch would execute.
+	for _, expression := range []string{`true ? tier("ok",p*2) : tier("bad",p*-1)`, `tier("bad",p/0)`, `tier("bad",p*header("coefficient"))`, `tier("bad",u(param("key"))*2)`, `tier("bad",sum(1..100000000))`, `tier("bad",u("seconds")*p)`} {
+		raw, err := common.Marshal(map[string]any{"success": true, "group_ratio": map[string]float64{"default": 1}, "data": []any{map[string]any{"model_name": "m", "enable_groups": []string{"default"}, "billing_mode": "tiered_expr", "billing_expr": expression, "billing_usage_schema": schema}}})
+		require.NoError(t, err)
+		result, err := ParsePriceSource(raw, source, "default", 500000)
+		require.NoError(t, err)
+		assert.Empty(t, result.Prices, expression)
+		assert.NotEmpty(t, result.Errors["m"], expression)
+	}
 }

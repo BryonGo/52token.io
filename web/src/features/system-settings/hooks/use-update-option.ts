@@ -20,6 +20,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import i18next from 'i18next'
 import { toast } from 'sonner'
 
+import { invalidateGroupQueries } from '@/lib/group-queries'
 import { handleServerError } from '@/lib/handle-server-error'
 import { requireServerSuccess } from '@/lib/server-error-message'
 
@@ -55,10 +56,26 @@ export function useUpdateOption() {
   return useMutation({
     mutationFn: async (request: UpdateOptionRequest) =>
       requireServerSuccess(await updateSystemOption(request)),
-    onSuccess: (data, variables) => {
+    onSuccess: async (data, variables) => {
       if (data.success) {
         // Always refresh system-options
         queryClient.invalidateQueries({ queryKey: ['system-options'] })
+
+        if (
+          [
+            'GroupRatio',
+            'GroupProfiles',
+            'TopupGroupRatio',
+            'UserUsableGroups',
+            'GroupGroupRatio',
+            'AutoGroups',
+            'MaxTokenAutoGroups',
+            'DefaultUseAutoGroup',
+            'group_ratio_setting.group_special_usable_group',
+          ].includes(variables.key)
+        ) {
+          await invalidateGroupQueries(queryClient)
+        }
 
         // If updating frontend-display-related config, also refresh status
         if (STATUS_RELATED_KEYS.has(variables.key)) {

@@ -30,6 +30,7 @@ import { getCurrencyDisplay } from '@/lib/currency'
 import { requireServerSuccess } from '@/lib/server-error-message'
 import { useSystemConfigStore } from '@/stores/system-config-store'
 
+import { getKeyProjects } from '../api'
 import { API_KEY_STATUSES } from '../constants'
 import type { ApiKey } from '../types'
 import { ApiKeyGroupCell } from './api-key-group-cell'
@@ -73,6 +74,10 @@ export function useApiKeysColumns(now: number): ColumnDef<ApiKey>[] {
   const { meta: currency } = getCurrencyDisplay()
   const quotaUnit = currency.kind === 'tokens' ? t('Tokens') : currency.symbol
   const groupRatios = useGroupRatios()
+  const { data: projects } = useQuery({
+    queryKey: ['key-projects'],
+    queryFn: async () => requireServerSuccess(await getKeyProjects()),
+  })
   const shouldReduceMotion = useMediaQuery('(prefers-reduced-motion: reduce)')
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const justNowLabel = t('Just now')
@@ -111,6 +116,17 @@ export function useApiKeysColumns(now: number): ColumnDef<ApiKey>[] {
         ),
         size: 180,
         meta: { mobileTitle: true },
+      },
+      {
+        accessorKey: 'project_id',
+        header: t('Key project'),
+        cell: ({ row }) => {
+          const id = row.original.project_id
+          if (!id) return t('Unassigned')
+          const list = Array.isArray(projects?.data) ? projects.data : []
+          return list.find((project) => project.id === id)?.name || `#${id}`
+        },
+        size: 160,
       },
       {
         accessorKey: 'status',
@@ -233,6 +249,15 @@ export function useApiKeysColumns(now: number): ColumnDef<ApiKey>[] {
         meta: { pinned: 'right' as const },
       },
     ],
-    [t, quotaUnit, now, groupRatios, shouldReduceMotion, locale, justNowLabel]
+    [
+      t,
+      projects,
+      quotaUnit,
+      now,
+      groupRatios,
+      shouldReduceMotion,
+      locale,
+      justNowLabel,
+    ]
   )
 }

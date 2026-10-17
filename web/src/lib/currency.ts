@@ -649,3 +649,17 @@ export function formatCNYAmount(
     exchangeRate: 1,
   })
 }
+
+/** Format an upstream amount denominated in USD without display FX. */
+export function formatUSDAmount(
+  amount: number | null | undefined,
+  options?: CurrencyFormatOptions
+): string {
+  if (amount == null || !Number.isFinite(amount)) return '-'
+  return formatCurrencyValue(amount, mergeOptions(options), {
+    kind: 'currency',
+    symbol: '$',
+    currencyCode: 'USD',
+    exchangeRate: 1,
+  })
+}

@@ -39,6 +39,7 @@ import { afterEach, assert, beforeEach, expect, it, vi } from 'vitest'
 import { api } from '@/lib/api'
 import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
+import { useSystemConfigStore } from '@/stores/system-config-store'
 
 import { CHANNEL_TYPE_VLLM, CHANNEL_TYPE_SGLANG } from '../../constants'
 import type { InferenceStatus } from '../../lib/inference-status'
@@ -512,5 +513,48 @@ it.each([
     expect(
       Boolean(screen.queryByRole('button', { name: 'Configure routes' }))
     ).toBe(editable)
+  }
+)
+
+it.each(['table', 'card'] as const)(
+  'keeps DeepSeek upstream balance in USD in %s layout while local usage follows the wallet display',
+  (layout) => {
+    const old = useSystemConfigStore.getState().config
+    useSystemConfigStore.getState().setConfig({
+      currency: {
+        ...old.currency,
+        quotaDisplayType: 'CNY',
+        usdExchangeRate: 7,
+      },
+    })
+    try {
+      const channel = channelSchema.parse({
+        id: 133,
+        type: 43,
+        key: '',
+        name: 'DeepSeek',
+        status: 1,
+        created_time: 1,
+        test_time: 0,
+        response_time: 0,
+        balance_updated_time: 0,
+        balance: 12.5,
+        used_quota: 500000,
+      })
+      render(
+        <QueryClientProvider client={client}>
+          <ChannelsProvider>
+            <ChannelRowActionsLayoutContext.Provider value={layout}>
+              <BalanceCell channel={channel} />
+            </ChannelRowActionsLayoutContext.Provider>
+          </ChannelsProvider>
+        </QueryClientProvider>
+      )
+      expect(screen.getByText('$12.5')).toBeVisible()
+      expect(screen.queryByText('¥87.5')).not.toBeInTheDocument()
+      expect(screen.getByText(layout === 'card' ? '7' : '¥7')).toBeVisible()
+    } finally {
+      useSystemConfigStore.getState().setConfig(old)
+    }
   }
 )

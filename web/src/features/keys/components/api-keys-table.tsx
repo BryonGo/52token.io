@@ -140,6 +140,9 @@ function ApiKeysMobileList({
         const groupCell = row
           .getAllCells()
           .find((cell) => cell.column.id === 'group')
+        const projectCell = row
+          .getAllCells()
+          .find((cell) => cell.column.id === 'project_id')
         const expiryCell = row
           .getAllCells()
           .find((cell) => cell.column.id === 'expired_time')
@@ -176,6 +179,14 @@ function ApiKeysMobileList({
             </div>
 
             <div className='min-w-0 space-y-3 py-1'>
+              <div className='break-words'>
+                {t('Key project')}:{' '}
+                {projectCell &&
+                  flexRender(
+                    projectCell.column.columnDef.cell,
+                    projectCell.getContext()
+                  )}
+              </div>
               <div className='min-w-0'>
                 {groupCell &&
                   flexRender(
@@ -217,7 +228,7 @@ function ApiKeysMobileList({
 
 export function ApiKeysTable() {
   const { t } = useTranslation()
-  const { refreshTrigger } = useApiKeys()
+  const { refreshTrigger, projectId } = useApiKeys()
   const [now, setNow] = useState(() => Date.now())
   const columns = useApiKeysColumns(now)
 
@@ -269,16 +280,19 @@ export function ApiKeysTable() {
       globalFilter,
       tokenFilter,
       refreshTrigger,
+      projectId,
     ],
     queryFn: async () => {
       const result = shouldSearch
         ? await searchApiKeys({
             keyword: globalFilter,
             token: tokenFilter,
+            project_id: projectId,
             p: pagination.pageIndex + 1,
             size: pagination.pageSize,
           })
         : await getApiKeys({
+            project_id: projectId,
             p: pagination.pageIndex + 1,
             size: pagination.pageSize,
           })
@@ -299,7 +313,6 @@ export function ApiKeysTable() {
         total: result.data?.total || 0,
       }
     },
-    placeholderData: (previousData) => previousData,
   })
 
   const apiKeys = data?.items || []

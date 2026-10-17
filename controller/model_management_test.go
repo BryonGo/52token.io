@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -22,6 +23,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
@@ -170,7 +172,9 @@ func TestModelPricingConversionDatabaseMatrix(t *testing.T) {
 				{"conversion-free", model.PricingValues{"ModelPrice": float64(0)}, `tier("request", fixed(0))`, ""},
 				{"conversion-fixed", model.PricingValues{"ModelPrice": float64(0.25), "ModelRatio": float64(7)}, `tier("request", fixed(0.25))`, ""},
 				{"gpt-4o-2024-05-13", model.PricingValues{"ModelRatio": float64(2), "CompletionRatio": float64(99)}, `tier("base", p * 4 + c * 12)`, ""},
-				{"gpt-image-2", model.PricingValues{"ModelPrice": float64(1)}, `tier("image", fixed(1)) * image_count`, ""},
+				{"gpt-image-conversion", model.PricingValues{"ModelPrice": float64(1)}, `tier("image", fixed(1)) * image_count`, ""},
+				// NewToken declares GPT Image 2 as a task model; preserve its usage-based pricing requirement.
+				{"gpt-image-2", model.PricingValues{"ModelPrice": float64(1)}, "", "Task pricing must be converted manually using the task usage schema."},
 				// Bailian image models are served by the alibaba task plugin, so their pricing is a task usage expression.
 				{"qwen-image-3.0-pro", model.PricingValues{"ModelPrice": float64(1)}, "", "Task pricing must be converted manually using the task usage schema."},
 				{"wan2.7-image-pro", model.PricingValues{"ModelPrice": float64(1)}, "", "Task pricing must be converted manually using the task usage schema."},
@@ -492,6 +496,8 @@ export function parseTaskResult() { return {}; }
 			db := modelManagementDB(t, dialect.kind, os.Getenv(dialect.env))
 
 			t.Run("channel_account_balance", testChannelAccountBalanceIsolation)
+
+			t.Run("model_health", testModelHealthFreeDiscoveryAndRouting)
 
 			t.Run("sub2api_cost_and_balance", testSub2APICostAndBalance)
 
@@ -1723,6 +1729,274 @@ export function parseTaskResult(){return {};}
 			require.NoError(t, err)
 			assert.Empty(t, final.Entries[0].Configured)
 			assert.Equal(t, "{}", final.Options[billing_setting.PluginBillingExprOption])
+		})
+	}
+}
+
+// The legacy fixture deliberately has no project column, matching the prior
+// release. Run both fresh installation and repeated upgrade on each engine.
+func TestManagedGroupsAndKeyProjectsMatrix(t *testing.T) {
+	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
+		t.Run(dialect.kind, func(t *testing.T) {
+			if dialect.env != "" && os.Getenv(dialect.env) == "" {
+				t.Skip("set " + dialect.env)
+			}
+			db := modelManagementDB(t, dialect.kind, os.Getenv(dialect.env))
+			oldRatios, oldUsable := ratio_setting.GroupRatio2JSONString(), setting.UserUsableGroups2JSONString()
+			t.Cleanup(func() {
+				require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(oldRatios))
+				require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(oldUsable))
+			})
+			require.NoError(t, db.AutoMigrate(&legacyToken{}))
+			legacy := legacyToken{UserId: 1, Name: "existing", Key: "project-migration-existing", Group: "route_a", UsedQuota: 123, RemainQuota: 456, Status: 1, ExpiredTime: -1}
+			require.NoError(t, db.Create(&legacy).Error)
+			for range 2 {
+				require.NoError(t, db.AutoMigrate(&model.Token{}, &model.TokenProject{}, &model.Log{}))
+			}
+			var preserved model.Token
+			require.NoError(t, db.First(&preserved, legacy.Id).Error)
+			assert.Equal(t, 0, preserved.ProjectID)
+			assert.Equal(t, 123, preserved.UsedQuota)
+			assert.Equal(t, 456, preserved.RemainQuota)
+			assert.Equal(t, "route_a", preserved.Group)
+			duplicate := model.Token{UserId: 1, Key: legacy.Key}
+			assert.Error(t, db.Create(&duplicate).Error)
+			require.True(t, db.Migrator().HasIndex(&model.Token{}, "idx_tokens_project_id"))
+			require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"route_a":0.08,"route_b":1}`))
+			require.NoError(t, model.UpdateOptionsBulk(map[string]string{"GroupRatio": `{"route_a":0.08,"route_b":1}`, "UserUsableGroups": `{"route_a":"a","route_b":"b","auto":"Auto"}`}))
+			channel := model.Channel{Name: "POJIA", Group: "route_a", Models: "deepseek-v4-pro", Key: "fixture-only"}
+			other := model.Channel{Name: "Official", Group: "route_b", Models: "deepseek-v4-pro", Key: "other-fixture"}
+			require.NoError(t, db.Create(&channel).Error)
+			require.NoError(t, db.Create(&other).Error)
+			user := model.User{Id: 1, Username: "project-owner", Group: "route_a", Status: 1}
+			require.NoError(t, db.Create(&user).Error)
+			snapshot := model.Option{Key: "channel_cost.fixture", Value: `{"prices":{"deepseek-v4-pro":{"input":4.5}}}`}
+			require.NoError(t, db.Create(&snapshot).Error)
+			catalog, err := model.GetGroupCatalog()
+			require.NoError(t, err)
+			input := model.GroupMutation{ID: "route_a", Name: "POJIA DeepSeek", Ratio: .08, Selectable: true, Description: "a", Version: catalog.Version}
+			id, err := model.SaveManagedGroup(input)
+			require.NoError(t, err)
+			assert.Equal(t, "route_a", id)
+			assert.Equal(t, "POJIA DeepSeek", model.GetGroupProfiles()[id].Name)
+			assert.Equal(t, .08, ratio_setting.GetGroupRatio(id))
+			assert.Equal(t, 1.0, ratio_setting.GetGroupRatio("route_b"))
+			require.NoError(t, db.First(&preserved, legacy.Id).Error)
+			assert.Equal(t, "route_a", preserved.Group)
+			require.NoError(t, db.First(&channel, channel.Id).Error)
+			assert.Equal(t, "route_a", channel.Group)
+			var after model.Option
+			require.NoError(t, db.Where(model.Option{Key: snapshot.Key}).First(&after).Error)
+			assert.Equal(t, snapshot.Value, after.Value)
+			_, err = model.SaveManagedGroup(input)
+			assert.Error(t, err, "stale editor must not overwrite newer settings")
+			assert.Error(t, model.UpdateOption("GroupRatio", `{"route_b":1}`), "referenced ID cannot be removed by legacy JSON")
+			catalog, err = model.GetGroupCatalog()
+			require.NoError(t, err)
+			freshID, err := model.SaveManagedGroup(model.GroupMutation{Name: "Another group", Ratio: 1, Version: catalog.Version})
+			require.NoError(t, err)
+			assert.Equal(t, "g1", freshID)
+			catalog, err = model.GetGroupCatalog()
+			require.NoError(t, err)
+			assert.Error(t, model.DeleteManagedGroup("route_a", catalog.Version), "channel/user/key references must block deletion")
+			assert.Error(t, model.DeleteManagedGroup("default", catalog.Version))
+			assert.Error(t, model.DeleteManagedGroup(freshID, "stale"))
+			deletedToken := model.Token{UserId: 1, Name: "deleted key", Key: "deleted-group-fixture", Group: freshID}
+			require.NoError(t, db.Create(&deletedToken).Error)
+			require.NoError(t, db.Delete(&deletedToken).Error)
+			require.NoError(t, model.DeleteManagedGroup(freshID, catalog.Version))
+			require.NoError(t, db.Unscoped().First(&deletedToken, deletedToken.Id).Error)
+			assert.Empty(t, deletedToken.Group)
+			assert.NotContains(t, model.GetGroupProfiles(), freshID)
+			catalog, err = model.GetGroupCatalog()
+			require.NoError(t, err)
+			nextID, err := model.SaveManagedGroup(model.GroupMutation{Name: "Another group", Ratio: 1, Version: catalog.Version})
+			require.NoError(t, err)
+			assert.Equal(t, "g2", nextID, "deleted identifiers must not be recycled")
+			sources, sourceVersion, err := model.GetChannelPriceSources()
+			require.NoError(t, err)
+			source := sources["happyapi"]
+			source.ID = "protected-upstream"
+			source.Name = "Protected upstream"
+			source.URL = "https://protected.example/api/pricing"
+			source.StatusURL = "https://protected.example/api/status"
+			source.ChannelOrigin = "https://protected.example"
+			source.DefaultCreditsPerCNY = 1
+			source.PriceCurrency = "CREDIT"
+			source.FilterField = "is_video_model"
+			source.FilterValue = "1"
+			source.FilterExclude = true
+			source.Fields.RequestUnit = "request_price_display_unit"
+			credential := model.PriceSourceCredential{Token: "fixture-private-administrator-token", UserID: 2752}
+			require.NoError(t, model.SaveChannelPriceSource(source, sourceVersion, credential))
+			savedSources, savedVersion, err := model.GetChannelPriceSources()
+			require.NoError(t, err)
+			assert.True(t, savedSources[source.ID].AuthConfigured)
+			assert.Equal(t, 2752, savedSources[source.ID].AuthUserID)
+			assert.Equal(t, 1.0, savedSources[source.ID].DefaultCreditsPerCNY)
+			assert.Equal(t, "is_video_model", savedSources[source.ID].FilterField)
+			assert.Equal(t, "1", savedSources[source.ID].FilterValue)
+			assert.True(t, savedSources[source.ID].FilterExclude)
+			assert.Equal(t, "request_price_display_unit", savedSources[source.ID].Fields.RequestUnit)
+			listed, err := common.Marshal(savedSources)
+			require.NoError(t, err)
+			assert.NotContains(t, string(listed), credential.Token)
+			optionsRecorder := httptest.NewRecorder()
+			optionsContext, _ := gin.CreateTestContext(optionsRecorder)
+			GetOptions(optionsContext)
+			assert.NotContains(t, optionsRecorder.Body.String(), credential.Token)
+			sourceWithWrongURL := source
+			sourceWithWrongURL.URL = "https://other.example/api/pricing"
+			_, _, err = model.GetPriceSourceCredential(sourceWithWrongURL)
+			assert.Error(t, err)
+			credential.Token = "fixture-rotated-administrator-token"
+			require.NoError(t, model.SaveChannelPriceSource(source, savedVersion, credential))
+			_, rotatedVersion, err := model.GetChannelPriceSources()
+			require.NoError(t, err)
+			assert.NotEqual(t, savedVersion, rotatedVersion)
+			assert.Error(t, model.SaveChannelPriceSource(source, savedVersion, credential), "credential rotation invalidates stale editors")
+
+			project, err := model.SaveTokenProject(1, 0, "Image product")
+			require.NoError(t, err)
+			_, err = model.SaveTokenProject(2, project.ID, "takeover")
+			assert.Error(t, err)
+			_, err = model.SaveTokenProject(1, 0, "Image product")
+			assert.Error(t, err)
+			another, err := model.SaveTokenProject(2, 0, "Image product")
+			require.NoError(t, err)
+			assert.Error(t, model.ValidateTokenProject(1, another.ID))
+			assert.NoError(t, model.ValidateTokenProject(1, 0))
+			require.NoError(t, db.Model(&preserved).Update("project_id", project.ID).Error)
+			tokens, total, err := model.SearchUserTokens(1, "", "", 0, 10, project.ID)
+			require.NoError(t, err)
+			assert.EqualValues(t, 1, total)
+			require.Len(t, tokens, 1)
+			assert.Equal(t, "route_a", tokens[0].Group)
+			tokens, total, err = model.SearchUserTokens(2, "", "", 0, 10, project.ID)
+			require.NoError(t, err)
+			assert.Zero(t, total)
+			assert.Empty(t, tokens)
+			// Exercise a physically separate log database, without a cross-DB join.
+			logDB, _ := newAuditTestDatabase(t, dialect.kind, os.Getenv(dialect.env))
+			require.NoError(t, logDB.AutoMigrate(&model.Log{}))
+			model.LOG_DB = logDB
+			// Logs are separately queried and always scoped to the key owner.
+			for _, log := range []model.Log{
+				{UserId: 1, TokenId: legacy.Id, Type: model.LogTypeConsume, ChannelId: channel.Id, ModelName: "deepseek-v4-pro", Quota: 100, PromptTokens: 1000, CompletionTokens: 10, CreatedAt: time.Now().Unix()},
+				{UserId: 1, TokenId: legacy.Id, Type: model.LogTypeConsume, ChannelId: other.Id, ModelName: "deepseek-v4-pro", Quota: 200, CreatedAt: time.Now().Unix()},
+				{UserId: 2, TokenId: legacy.Id, Type: model.LogTypeConsume, ChannelId: channel.Id, ModelName: "deepseek-v4-pro", Quota: 99999, CreatedAt: time.Now().Unix()},
+				{UserId: 1, TokenId: legacy.Id, Type: model.LogTypeConsume, ChannelId: channel.Id, ModelName: "deepseek-v4-pro", Quota: 99999, CreatedAt: time.Now().AddDate(0, 0, -31).Unix()},
+			} {
+				require.NoError(t, logDB.Create(&log).Error)
+			}
+			usage, err := model.GetTokenProjectUsage(1, &project.ID, 30)
+			require.NoError(t, err)
+			assert.EqualValues(t, 300, usage.PeriodQuota)
+			assert.EqualValues(t, 123, usage.TotalQuota)
+			require.Len(t, usage.Families, 1)
+			assert.Equal(t, "DeepSeek", usage.Families[0].Name)
+			assert.EqualValues(t, 300, usage.Families[0].Quota)
+			assert.EqualValues(t, 300, usage.Daily[29].Quota)
+			assert.EqualValues(t, 2, usage.Requests)
+			_, err = model.GetTokenProjectUsage(1, &another.ID, 30)
+			assert.Error(t, err)
+			_, err = model.GetTokenProjectUsage(1, &project.ID, 365)
+			assert.Error(t, err)
+			zone := time.FixedZone("Asia/Shanghai", 8*3600)
+			now := time.Now().In(zone)
+			today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, zone)
+			for _, entry := range []model.Log{
+				{UserId: 1, TokenId: legacy.Id, Type: model.LogTypeConsume, ModelName: "seedream-5.0", Quota: 50, CreatedAt: today.AddDate(0, 0, -7).Unix()},
+				{UserId: 1, TokenId: legacy.Id, Type: model.LogTypeConsume, ModelName: "seedance-2.0", Quota: 20, CreatedAt: today.Unix() - 1},
+				{UserId: 1, TokenId: legacy.Id, Type: model.LogTypeConsume, ModelName: "seedream-4.5", Quota: 10, CreatedAt: today.AddDate(0, 0, -29).Unix()},
+				{UserId: 1, TokenId: legacy.Id, Type: model.LogTypeConsume, ModelName: "seedream-4.5", Quota: 90000, CreatedAt: today.AddDate(0, 0, -29).Unix() - 1},
+				{UserId: 1, TokenId: legacy.Id, Type: model.LogTypeError, ModelName: "seedream-5.0", Quota: 90000, CreatedAt: now.Unix()},
+			} {
+				require.NoError(t, logDB.Create(&entry).Error)
+			}
+			for _, period := range []struct {
+				days  int
+				quota int64
+			}{{1, 300}, {7, 320}, {30, 380}} {
+				report, err := model.GetTokenProjectUsage(1, &project.ID, period.days)
+				require.NoError(t, err)
+				assert.Equal(t, period.quota, report.PeriodQuota)
+				require.Len(t, report.Daily, period.days)
+				var dailySum, familySum, modelSum int64
+				for _, row := range report.Daily {
+					dailySum += row.Quota
+				}
+				for _, row := range report.Families {
+					familySum += row.Quota
+				}
+				for _, row := range report.Models {
+					modelSum += row.Quota
+				}
+				assert.Equal(t, period.quota, dailySum)
+				assert.Equal(t, period.quota, familySum)
+				assert.Equal(t, period.quota, modelSum)
+			}
+			allProjects, err := model.GetTokenProjectUsage(1, nil, 30)
+			require.NoError(t, err)
+			assert.EqualValues(t, 380, allProjects.PeriodQuota)
+			unassigned := 0
+			empty, err := model.GetTokenProjectUsage(1, &unassigned, 7)
+			require.NoError(t, err)
+			assert.Zero(t, empty.PeriodQuota)
+			require.Len(t, empty.Daily, 7)
+			ctxReport, wReport := newAuthenticatedContext(t, http.MethodGet, "/api/token/project-usage?days=7", nil, 1)
+			GetTokenProjectUsage(ctxReport)
+			require.True(t, decodeAPIResponse(t, wReport).Success)
+			for _, tc := range []struct {
+				name    string
+				group   string
+				project int
+				success bool
+			}{
+				{"valid", "route_a", project.ID, true}, {"unknown group", "random-string", project.ID, false}, {"other project", "route_a", another.ID, false}, {"negative project", "route_a", -1, false},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					ctx, w := newAuthenticatedContext(t, http.MethodPost, "/api/token/", map[string]any{"name": tc.name, "group": tc.group, "project_id": tc.project, "unlimited_quota": true, "expired_time": -1}, 1)
+					ctx.Set("group", "route_a")
+					AddToken(ctx)
+					response := decodeAPIResponse(t, w)
+					assert.Equal(t, tc.success, response.Success, response.Message)
+				})
+			}
+			// Project-only editing preserves the exact group and price multiplier.
+			ctx, w := newAuthenticatedContext(t, http.MethodPut, "/api/token/", map[string]any{"id": legacy.Id, "name": "existing", "group": "route_a", "project_id": 0, "unlimited_quota": true, "expired_time": -1}, 1)
+			ctx.Set("group", "route_a")
+			UpdateToken(ctx)
+			require.True(t, decodeAPIResponse(t, w).Success)
+			require.NoError(t, db.First(&preserved, legacy.Id).Error)
+			assert.Zero(t, preserved.ProjectID)
+			assert.Equal(t, "route_a", preserved.Group)
+			assert.Equal(t, .08, ratio_setting.GetGroupRatio("route_a"))
+			require.NoError(t, db.Model(&preserved).Updates(map[string]any{"project_id": project.ID, "group": "orphaned-legacy"}).Error)
+			ctx, w = newAuthenticatedContext(t, http.MethodPut, "/api/token/", map[string]any{"id": legacy.Id, "name": "legacy project edit", "group": "orphaned-legacy", "project_id": 0, "unlimited_quota": true, "expired_time": -1}, 1)
+			ctx.Set("group", "route_a")
+			UpdateToken(ctx)
+			require.True(t, decodeAPIResponse(t, w).Success)
+			require.NoError(t, db.First(&preserved, legacy.Id).Error)
+			assert.Zero(t, preserved.ProjectID)
+			assert.Equal(t, "orphaned-legacy", preserved.Group)
+			require.NoError(t, db.Model(&preserved).Update("project_id", project.ID).Error)
+			ctx, w = newAuthenticatedContext(t, http.MethodPut, "/api/token/", map[string]any{"id": legacy.Id, "name": "old client", "group": "orphaned-legacy", "unlimited_quota": true, "expired_time": -1}, 1)
+			ctx.Set("group", "route_a")
+			UpdateToken(ctx)
+			require.True(t, decodeAPIResponse(t, w).Success)
+			require.NoError(t, db.First(&preserved, legacy.Id).Error)
+			assert.Equal(t, project.ID, preserved.ProjectID)
+			// Fresh tables and repeated startup keep owner/name uniqueness.
+			require.NoError(t, db.Migrator().DropTable(&model.TokenProject{}))
+			for range 2 {
+				require.NoError(t, db.AutoMigrate(&model.TokenProject{}))
+			}
+			_, err = model.SaveTokenProject(1, 0, "Fresh")
+			require.NoError(t, err)
+			_, err = model.SaveTokenProject(1, 0, "Fresh")
+			assert.Error(t, err)
+			testPublicCatalogWithDatabase(t, db)
 		})
 	}
 }

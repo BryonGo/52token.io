@@ -263,11 +263,17 @@ export function formatFixedPrice(
 ): string {
   if (model.channel_cost?.error) return '-'
   if (model.channel_cost?.cny_request_price != null) {
-    return formatCNYAmount(model.channel_cost.cny_request_price, {
-      digitsLarge: 4,
-      digitsSmall: 8,
-      abbreviate: false,
-    })
+    return formatCNYAmount(
+      model.channel_cost.cny_request_price *
+        (model.channel_cost.local_group_billing
+          ? getConfiguredGroupRatio(groupRatio, group)
+          : 1),
+      {
+        digitsLarge: 4,
+        digitsSmall: 8,
+        abbreviate: false,
+      }
+    )
   }
   if (model.quota_type !== QUOTA_TYPE_VALUES.REQUEST) {
     return '-'
@@ -303,12 +309,18 @@ export function formatRequestPrice(
 ): string {
   if (model.channel_cost?.error) return '-'
   if (model.channel_cost?.cny_request_price != null) {
-    return formatCNYAmount(model.channel_cost.cny_request_price, {
-      showSymbol: showCurrencySymbol,
-      digitsLarge: 4,
-      digitsSmall: 8,
-      abbreviate: false,
-    })
+    return formatCNYAmount(
+      model.channel_cost.cny_request_price *
+        (model.channel_cost.local_group_billing
+          ? getDisplayGroupRatio(model, selectedGroup)
+          : 1),
+      {
+        showSymbol: showCurrencySymbol,
+        digitsLarge: 4,
+        digitsSmall: 8,
+        abbreviate: false,
+      }
+    )
   }
   if (model.quota_type !== QUOTA_TYPE_VALUES.REQUEST) {
     return '-'

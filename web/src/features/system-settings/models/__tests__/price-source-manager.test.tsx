@@ -64,6 +64,32 @@ test('previews new field mappings without saving, then saves with the registry v
     .mockResolvedValue({ data: { success: true } })
   setup()
   const user = await fillSource()
+  fireEvent.change(
+    screen.getByLabelText('Upstream administrator access token (optional)'),
+    {
+      target: { value: 'fixture-private-access' },
+    }
+  )
+  fireEvent.change(
+    screen.getByRole('spinbutton', {
+      name: 'Upstream administrator user ID (optional)',
+    }),
+    {
+      target: { value: '2752' },
+    }
+  )
+  fireEvent.change(
+    screen.getByRole('textbox', { name: 'Model filter field (optional)' }),
+    {
+      target: { value: 'is_video_model' },
+    }
+  )
+  fireEvent.change(
+    screen.getByRole('textbox', { name: 'Model filter value' }),
+    {
+      target: { value: '1' },
+    }
+  )
   await user.click(screen.getByRole('button', { name: 'Test field mappings' }))
   expect(
     await screen.findByText('Matched models: 1; unsupported: 0')
@@ -81,6 +107,19 @@ test('previews new field mappings without saving, then saves with the registry v
       }),
     })
   )
+  expect(post.mock.calls[0][1]).toEqual(
+    expect.objectContaining({
+      auth_token: 'fixture-private-access',
+      auth_user_id: 2752,
+      source: expect.objectContaining({
+        filter_field: 'is_video_model',
+        filter_value: '1',
+      }),
+    })
+  )
+  expect(
+    (post.mock.calls[0][1] as { source: unknown }).source
+  ).not.toHaveProperty('auth_token')
   await user.click(screen.getByRole('button', { name: 'Save' }))
   await waitFor(() =>
     expect(put).toHaveBeenCalledWith(
@@ -89,6 +128,7 @@ test('previews new field mappings without saving, then saves with the registry v
         expected_version: 'v1',
         source: expect.objectContaining({
           id: 'custom',
+          default_credits_per_cny: 1,
           channel_origin: 'https://upstream.example',
         }),
       })

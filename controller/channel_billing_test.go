@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -303,14 +304,25 @@ func testChannelAccountBalanceIsolation(t *testing.T) {
 	defer server.Close()
 	for _, fx := range []float64{1, 7} {
 		operation_setting.USDExchangeRate = fx
-		for i := range 2 {
-			channel := &model.Channel{Type: constant.ChannelTypeAdvancedCustom, Name: fmt.Sprintf("account-%d-%g", i, fx), BaseURL: common.GetPointer(server.URL), Key: "model-call-key"}
-			channel.SetSetting(dto.ChannelSettings{SuperKey: []string{"account-one", "account-two"}[i], SuperKeyUserID: []int{11, 22}[i]})
+		for i := range 6 {
+			channelType := constant.ChannelTypeAdvancedCustom
+			pluginKey := ""
+			if i >= 2 {
+				channelType = constant.ChannelTypeTaskPlugin
+				pluginKey = "newtoken"
+			}
+			if i >= 4 {
+				channelType = constant.ChannelTypeOpenAI
+				pluginKey = ""
+			}
+			account := i % 2
+			channel := &model.Channel{Type: channelType, Name: fmt.Sprintf("account-%d-%g", i, fx), BaseURL: common.GetPointer(server.URL), Key: "model-call-key"}
+			channel.SetSetting(dto.ChannelSettings{TaskPluginKey: pluginKey, SuperKey: []string{"account-one", "account-two"}[account], SuperKeyUserID: []int{11, 22}[account]})
 			channel.SetOtherSettings(dto.ChannelOtherSettings{CostBilling: &dto.ChannelCostSettings{Enabled: true, Source: "happyapi", CreditsPerCNY: 5, UpstreamGroup: "vip"}})
 			require.NoError(t, model.DB.Create(channel).Error)
 			result, err := updateChannelBalance(channel)
 			require.NoError(t, err)
-			assert.InDelta(t, []float64{20, 4}[i], result.Balance*fx, 1e-10, "CNY acquisition cost, independent account and display FX")
+			assert.InDelta(t, []float64{20, 4}[account], result.Balance*fx, 1e-10, "CNY acquisition cost, independent account and display FX")
 			assert.Empty(t, result.RawResponse, "account profile fields must not be returned")
 			var saved model.Channel
 			require.NoError(t, model.DB.First(&saved, channel.Id).Error)
@@ -321,6 +333,43 @@ func testChannelAccountBalanceIsolation(t *testing.T) {
 			clearChannelInfo(&saved)
 			assert.Empty(t, saved.GetSetting().SuperKey, "management responses never disclose account credentials")
 		}
+	}
+}
+
+func TestNewTokenPluginBalanceManagementEndpoint(t *testing.T) {
+	setupSub2APIBalanceTest(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/user/self":
+			assert.Equal(t, "Bearer account-fixture", r.Header.Get("Authorization"))
+			assert.Equal(t, "2752", r.Header.Get("New-Api-User"))
+			_, _ = w.Write([]byte(`{"success":true,"data":{"quota":12500000,"access_token":"must-not-leak"}}`))
+		case "/api/status":
+			_, _ = w.Write([]byte(`{"success":true,"data":{"quota_per_unit":500000}}`))
+		default:
+			t.Errorf("unexpected balance request: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	for _, pluginKey := range []string{"newtoken", "byteplus"} {
+		channel := &model.Channel{Type: constant.ChannelTypeTaskPlugin, BaseURL: common.GetPointer(server.URL), Key: "model-call-key"}
+		channel.SetSetting(dto.ChannelSettings{TaskPluginKey: pluginKey, SuperKey: "account-fixture", SuperKeyUserID: 2752})
+		require.NoError(t, model.DB.Create(channel).Error)
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Params = gin.Params{{Key: "id", Value: fmt.Sprint(channel.Id)}}
+		UpdateChannelBalance(ctx)
+		var response struct {
+			Success bool    `json:"success"`
+			Balance float64 `json:"balance"`
+		}
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+		assert.Equal(t, pluginKey == "newtoken", response.Success)
+		if response.Success {
+			assert.Equal(t, 25.0, response.Balance)
+		}
+		assert.NotContains(t, recorder.Body.String(), "must-not-leak")
+		assert.NotContains(t, recorder.Body.String(), "account-fixture")
 	}
 }
 

@@ -36,8 +36,10 @@ import type {
 export async function getApiKeys(
   params: GetApiKeysParams = {}
 ): Promise<GetApiKeysResponse> {
-  const { p = 1, size = 10 } = params
-  const res = await api.get(`/api/token/?p=${p}&size=${size}`)
+  const { p = 1, size = 10, project_id } = params
+  const res = await api.get(
+    `/api/token/?p=${p}&size=${size}${project_id == null ? '' : `&project_id=${project_id}`}`
+  )
   return res.data
 }
 
@@ -47,6 +49,9 @@ export async function searchApiKeys(
 ): Promise<GetApiKeysResponse> {
   const { keyword = '', token = '', p, size } = params
   const queryParams = new URLSearchParams()
+  if (params.project_id != null) {
+    queryParams.set('project_id', String(params.project_id))
+  }
   if (keyword) queryParams.set('keyword', keyword)
   if (token) queryParams.set('token', token)
   if (p != null) queryParams.set('p', String(p))
@@ -124,4 +129,14 @@ export async function fetchTokenKeysBatch(ids: number[]): Promise<{
 }> {
   const res = await api.post('/api/token/batch/keys', { ids })
   return res.data
+}
+
+export type KeyProject = { id: number; name: string }
+export async function getKeyProjects(): Promise<ApiResponse<KeyProject[]>> {
+  return (await api.get('/api/token/projects')).data
+}
+export async function saveKeyProject(
+  data: KeyProject
+): Promise<ApiResponse<KeyProject>> {
+  return (await api.put('/api/token/projects', data)).data
 }

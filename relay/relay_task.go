@@ -2,9 +2,11 @@ package relay
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,6 +17,7 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
+	"github.com/QuantumNous/new-api/pkg/channelcost"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/task/taskcommon"
@@ -257,6 +260,14 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 		pluginKey = pinnedPlugin.Plugin.Meta.Key
 	}
 	exprStr, exists := billing_setting.ResolveTaskBillingExpr(pluginKey, modelName, info.UpstreamModelName)
+	costReceipt, costExpression, costGroup, costErr := helper.ChannelCostTaskExpression(c, info)
+	if costErr != nil {
+		return nil, service.TaskErrorWrapper(costErr, "model_price_error", http.StatusBadRequest, common.UpstreamAddresses(c)...)
+	}
+	if costReceipt != nil {
+		exprStr = costExpression
+		exists = true
+	}
 	useTiered := exists || billing_setting.GetBillingMode(modelName) == billing_setting.BillingModeTieredExpr
 	if useTiered {
 		provider, supported := adaptor.(channel.TaskUsageFactsProvider)
@@ -267,8 +278,21 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 			return nil, service.TaskErrorWrapper(fmt.Errorf("task model %s has no usage expression or meter", modelName), "model_price_error", http.StatusBadRequest, common.UpstreamAddresses(c)...)
 		}
 		sharedModel := pinnedPlugin.Generation.SharedModel(modelName) || pinnedPlugin.Generation.SharedModel(info.UpstreamModelName)
-		if sharedModel && pinnedPlugin.Plugin != nil {
+		if (sharedModel || costReceipt != nil) && pinnedPlugin.Plugin != nil {
 			schema, _ := pinnedPlugin.Plugin.Meta.UsageForModels(info.UpstreamModelName, modelName)
+			if costReceipt != nil && len(costReceipt.UsageSchema) > 0 {
+				encoded, e := common.Marshal(schema)
+				var rawSchema map[string]json.RawMessage
+				if e == nil {
+					e = common.Unmarshal(encoded, &rawSchema)
+				}
+				if e == nil {
+					e = channelcost.ValidateTaskMeter(exprStr, costReceipt.UsageSchema, rawSchema)
+				}
+				if e != nil {
+					return nil, service.TaskErrorWrapper(e, "model_price_error", http.StatusBadRequest, common.UpstreamAddresses(c)...)
+				}
+			}
 			if !billing_setting.TaskExprCompatible(exprStr, schema) {
 				return nil, service.TaskErrorWrapper(fmt.Errorf("task model %s pricing is not configured for plugin %s", modelName, pluginKey), "model_price_error", http.StatusBadRequest, common.UpstreamAddresses(c)...)
 			}
@@ -282,18 +306,29 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 		} else {
 			facts = provider.ExtractUsageFacts(c, info)
 		}
+		if costReceipt != nil && costReceipt.Dynamic {
+			if reference, ok := facts["video_input"].(string); ok && reference != "none" && reference != "" && len(costReceipt.UsageSchema["video_input"]) == 0 {
+				return nil, service.TaskErrorWrapper(errors.New("Upstream reference-video pricing is not synchronized"), "model_price_error", http.StatusBadRequest, common.UpstreamAddresses(c)...)
+			}
+		}
 		cost, trace, runErr := billingexpr.RunExprWithRequest(exprStr, billingexpr.TokenParams{}, billingexpr.RequestInput{Usage: facts})
-		if runErr != nil || cost < 0 {
+		if runErr != nil || cost < 0 || math.IsNaN(cost) || math.IsInf(cost, 0) {
 			if runErr == nil {
 				runErr = fmt.Errorf("negative task expression result")
 			}
 			return nil, service.TaskErrorWrapper(runErr, "model_price_error", http.StatusBadRequest, common.UpstreamAddresses(c)...)
 		}
 		groupRatioInfo := helper.HandleGroupRatio(c, info)
+		if costReceipt != nil {
+			groupRatioInfo = costGroup
+		}
 		quota, clamp := common.QuotaRoundChecked(cost * common.QuotaPerUnit * groupRatioInfo.GroupRatio)
+		if costReceipt != nil {
+			quota, clamp = common.QuotaFromFloatChecked(cost * common.QuotaPerUnit * groupRatioInfo.GroupRatio)
+		}
 		noteTaskQuotaClamp(info, clamp)
-		priceData = types.PriceData{Quota: quota, QuotaToPreConsume: quota, GroupRatioInfo: groupRatioInfo}
-		info.TieredBillingSnapshot = &billingexpr.BillingSnapshot{BillingMode: billing_setting.BillingModeTieredExpr, ModelName: modelName, ExprString: exprStr, ExprHash: billingexpr.ExprHashString(exprStr), GroupRatio: groupRatioInfo.GroupRatio, EstimatedQuotaBeforeGroup: cost * common.QuotaPerUnit, EstimatedQuotaAfterGroup: quota, EstimatedTier: trace.MatchedTier, QuotaPerUnit: common.QuotaPerUnit, ExprVersion: billingexpr.ExprVersion(exprStr), TaskUsageBilling: true, UsageFacts: facts}
+		priceData = types.PriceData{ChannelCost: costReceipt, Quota: quota, QuotaToPreConsume: quota, GroupRatioInfo: groupRatioInfo}
+		info.TieredBillingSnapshot = &billingexpr.BillingSnapshot{BillingMode: billing_setting.BillingModeTieredExpr, ModelName: modelName, ExprString: exprStr, ExprHash: billingexpr.ExprHashString(exprStr), GroupRatio: groupRatioInfo.GroupRatio, EstimatedQuotaBeforeGroup: cost * common.QuotaPerUnit, EstimatedQuotaAfterGroup: quota, EstimatedTier: trace.MatchedTier, QuotaPerUnit: common.QuotaPerUnit, ExprVersion: billingexpr.ExprVersion(exprStr), TaskUsageBilling: true, ProcurementCost: costReceipt != nil, UsageFacts: facts}
 	} else {
 		priceData, err = helper.ModelPriceHelperPerCall(c, info)
 		if err != nil {

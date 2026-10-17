@@ -70,6 +70,89 @@ const extensionPlugin: TaskPluginOption = {
   models: ['sora-2'],
 }
 
+test('relay category lists legacy gateways and any relay plugin while official plugins stay separate', async () => {
+  const user = userEvent.setup()
+  const select = vi.fn()
+  render(
+    <ChannelProviderPicker
+      isCreating
+      plugins={[
+        {
+          key: 'newtoken',
+          name: 'NewToken',
+          providerKind: 'relay',
+          models: ['seedream'],
+        },
+        {
+          key: 'future-relay',
+          name: 'Future Relay',
+          providerKind: 'relay',
+          models: ['image'],
+        },
+        { key: 'byteplus', name: 'BytePlus', models: ['seedance'] },
+      ]}
+      canBindPlugin
+      loading={false}
+      failed={false}
+      disabled={false}
+      onRetry={vi.fn()}
+      onSelect={select}
+    />
+  )
+  await user.click(screen.getByRole('tab', { name: 'Relay providers' }))
+  expect(
+    screen.getByRole('option', { name: 'New API (Legacy) Built-in #66' })
+  ).toBeVisible()
+  expect(
+    screen.getByRole('option', { name: 'Future Relay Plugin future-relay' })
+  ).toBeVisible()
+  expect(
+    screen.queryByRole('option', { name: 'BytePlus Plugin byteplus' })
+  ).not.toBeInTheDocument()
+  await user.click(
+    screen.getByRole('option', { name: 'NewToken Plugin newtoken' })
+  )
+  expect(select).toHaveBeenLastCalledWith({ kind: 'plugin', key: 'newtoken' })
+  await user.click(screen.getByRole('tab', { name: 'Plugins' }))
+  expect(
+    screen.getByRole('option', { name: 'BytePlus Plugin byteplus' })
+  ).toBeVisible()
+  expect(
+    screen.queryByRole('option', { name: 'NewToken Plugin newtoken' })
+  ).not.toBeInTheDocument()
+  await user.click(screen.getByRole('tab', { name: 'Custom' }))
+  expect(
+    screen.queryByRole('option', { name: 'New API (Legacy) Built-in #66' })
+  ).not.toBeInTheDocument()
+})
+
+test('88API relay preset selects the legacy adapter and retains its own selected state', async () => {
+  const user = userEvent.setup()
+  const select = vi.fn()
+  render(
+    <ChannelProviderPicker
+      isCreating
+      currentProvider={{ kind: 'builtin', type: 66, preset: '88api' }}
+      plugins={[]}
+      canBindPlugin
+      loading={false}
+      failed={false}
+      disabled={false}
+      onRetry={vi.fn()}
+      onSelect={select}
+    />
+  )
+  await user.click(screen.getByRole('tab', { name: 'Relay providers' }))
+  const preset = screen.getByRole('option', { name: '88API Built-in #66' })
+  expect(preset).toHaveAttribute('aria-current', 'true')
+  await user.click(preset)
+  expect(select).toHaveBeenCalledWith({
+    kind: 'builtin',
+    type: 66,
+    preset: '88api',
+  })
+})
+
 test('creation hides legacy Zhipu from categories and numeric search while GLM remains selectable', async () => {
   const user = userEvent.setup()
   const select = vi.fn()
@@ -511,7 +594,7 @@ test.each([true, false])(
         onSelect={select}
       />
     )
-    for (const category of ['All', 'Built-in', 'Gateways']) {
+    for (const category of ['All', 'Gateways', 'Relay providers']) {
       await user.click(screen.getByRole('tab', { name: category }))
       expect(
         screen.getByRole('option', { name: 'New API Built-in #60' })
@@ -520,6 +603,7 @@ test.each([true, false])(
         screen.getByRole('option', { name: 'Sub2API Built-in #59' })
       ).toBeVisible()
     }
+    await user.click(screen.getByRole('tab', { name: 'Gateways' }))
     expect(screen.getAllByRole('option')).toHaveLength(2)
     await user.click(
       screen.getByRole('option', { name: 'New API Built-in #60' })
@@ -532,7 +616,7 @@ test.each([true, false])(
       screen.getByRole('option', { name: 'Sub2API Built-in #59' })
     )
     expect(select).toHaveBeenLastCalledWith({ kind: 'builtin', type: 59 })
-    await user.click(screen.getByRole('tab', { name: 'Built-in' }))
+    await user.click(screen.getByRole('tab', { name: 'Relay providers' }))
     expect(search).toHaveValue('Sub2API')
     expect(
       screen.getByRole('option', { name: 'Sub2API Built-in #59' })
@@ -558,7 +642,7 @@ test('custom providers have their own tab and keep the search when switching cat
     />
   )
   const tabs = screen.getByRole('tablist', { name: 'Provider source' })
-  expect(within(tabs).getAllByRole('tab')).toHaveLength(5)
+  expect(within(tabs).getAllByRole('tab')).toHaveLength(6)
   await user.click(within(tabs).getByRole('tab', { name: 'Custom' }))
   const panel = screen.getByRole('tabpanel', { name: 'Custom' })
   expect(within(panel).getAllByRole('option')).toHaveLength(2)
@@ -573,6 +657,9 @@ test('custom providers have their own tab and keep the search when switching cat
   ).not.toBeInTheDocument()
 
   await user.click(within(tabs).getByRole('tab', { name: 'Built-in' }))
+  expect(
+    screen.queryByRole('option', { name: 'New API (Legacy) Built-in #66' })
+  ).not.toBeInTheDocument()
   expect(
     screen.getByRole('option', { name: 'OpenAI Built-in #1' })
   ).toBeVisible()
@@ -627,6 +714,12 @@ test('category tabs use arrow and Enter navigation without moving focus into the
   expect(screen.getByRole('tab', { name: 'Gateways' })).toHaveFocus()
   expect(screen.getByRole('tabpanel', { name: 'Gateways' })).toBeVisible()
   expect(screen.queryByText('Failed to load plugins')).not.toBeInTheDocument()
+  await user.keyboard('{ArrowRight}{Enter}')
+  expect(screen.getByRole('tab', { name: 'Relay providers' })).toHaveFocus()
+  expect(
+    screen.getByRole('tabpanel', { name: 'Relay providers' })
+  ).toBeVisible()
+  expect(screen.getByText('Failed to load plugins')).toBeVisible()
   await user.keyboard('{ArrowRight}{Enter}')
   expect(screen.getByRole('tab', { name: 'Custom' })).toHaveFocus()
   expect(screen.getByRole('tabpanel', { name: 'Custom' })).toBeVisible()

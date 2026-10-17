@@ -63,6 +63,7 @@ export async function getInferenceStatus(
 }
 
 export type TaskPluginOption = {
+  providerKind?: 'provider' | 'relay'
   sortPriority?: number
   website?: string
   key: string

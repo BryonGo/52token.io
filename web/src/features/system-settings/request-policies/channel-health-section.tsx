@@ -91,7 +91,7 @@ const createChannelHealthSchema = (
         auto_test_channel_minutes: z.coerce
           .number()
           .int()
-          .min(1, t('Interval must be at least 1 minute')),
+          .min(30, t('Chat checks must be at least 30 minutes apart')),
         channel_test_concurrency: z.coerce
           .number()
           .int(t('Enter a positive integer'))
@@ -162,8 +162,10 @@ const buildFormDefaults = (
   monitor_setting: {
     auto_test_channel_enabled:
       defaults['monitor_setting.auto_test_channel_enabled'],
-    auto_test_channel_minutes:
-      defaults['monitor_setting.auto_test_channel_minutes'],
+    auto_test_channel_minutes: Math.max(
+      30,
+      defaults['monitor_setting.auto_test_channel_minutes'] || 30
+    ),
     channel_test_concurrency:
       defaults['monitor_setting.channel_test_concurrency'],
     channel_test_mode: normalizeChannelTestMode(
@@ -186,8 +188,10 @@ const normalizeDefaults = (
   ).normalized,
   'monitor_setting.auto_test_channel_enabled':
     defaults['monitor_setting.auto_test_channel_enabled'],
-  'monitor_setting.auto_test_channel_minutes':
-    defaults['monitor_setting.auto_test_channel_minutes'],
+  'monitor_setting.auto_test_channel_minutes': Math.max(
+    30,
+    defaults['monitor_setting.auto_test_channel_minutes'] || 30
+  ),
   'monitor_setting.channel_test_concurrency':
     defaults['monitor_setting.channel_test_concurrency'],
   'monitor_setting.channel_test_mode': normalizeChannelTestMode(
@@ -256,12 +260,12 @@ export function ChannelHealthSection({
       break
     case 'passive_recovery':
       channelTestModeDescription = t(
-        'Does not check healthy channels. It only rechecks auto-disabled channels and restores them after they recover.'
+        'Checks channels with parked models or automatic failures to detect recovery.'
       )
       break
     default:
       channelTestModeDescription = t(
-        'Periodically checks all channels except manually disabled ones to detect failures and recover channels automatically.'
+        'Checks models on all channels except manually disabled ones. Failing models are parked individually; channels stay enabled.'
       )
   }
   const autoDisableParsed = useMemo(
@@ -323,6 +327,16 @@ export function ChannelHealthSection({
             <h4 className='text-sm font-medium'>
               {t('Channel health checks')}
             </h4>
+            <p className='text-muted-foreground text-sm'>
+              {t(
+                'Chat checks are at least 30 minutes apart per channel and model. Three consecutive failures park a model; successful checks restore it.'
+              )}
+            </p>
+            <p className='text-muted-foreground text-sm'>
+              {t(
+                'Images, videos and audio use free model discovery only. Generation is never requested by scheduled checks or Test All.'
+              )}
+            </p>
             <SettingsFormGrid>
               <SettingsControlGroup>
                 <FormField
@@ -417,7 +431,7 @@ export function ChannelHealthSection({
                         <FormControl>
                           <Input
                             type='number'
-                            min={1}
+                            min={30}
                             step={1}
                             {...safeNumberFieldProps(field)}
                           />
@@ -500,7 +514,7 @@ export function ChannelHealthSection({
                       <FormLabel>{t('Disable on failure')}</FormLabel>
                       <FormDescription>
                         {t(
-                          'Apply disable rules to upstream request errors and scheduled or bulk health checks'
+                          'Apply channel disable rules to real upstream request errors; scheduled checks only park individual models'
                         )}
                       </FormDescription>
                     </SettingsSwitchContent>
@@ -511,33 +525,6 @@ export function ChannelHealthSection({
                       />
                     </FormControl>
                   </SettingsSwitchItem>
-                )}
-              />
-
-              <FormField
-                control={form.control}
-                name='ChannelDisableThreshold'
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>
-                      {t('Health check timeout threshold (seconds)')}
-                    </FormLabel>
-                    <FormControl>
-                      <Input
-                        type='number'
-                        min={0}
-                        step={1}
-                        value={field.value}
-                        onChange={(event) => field.onChange(event.target.value)}
-                      />
-                    </FormControl>
-                    <FormDescription>
-                      {t(
-                        'Scheduled or bulk health checks can disable a channel when this duration is exceeded, if both global and channel auto-disable are enabled.'
-                      )}
-                    </FormDescription>
-                    <FormMessage />
-                  </FormItem>
                 )}
               />
 

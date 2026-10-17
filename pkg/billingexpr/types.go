@@ -3,11 +3,14 @@ package billingexpr
 import (
 	"crypto/sha256"
 	"fmt"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 )
 
 type RequestInput struct {
+	// Now is a host-supplied quote/test clock; clients cannot supply it.
+	Now     time.Time `json:"-"`
 	Headers map[string]string
 	Body    []byte
 	Usage   map[string]any
@@ -78,6 +81,7 @@ type BillingSnapshot struct {
 	EstimatedFixedPrice       *float64       `json:"estimated_fixed_price,omitempty"`
 	QuotaPerUnit              float64        `json:"quota_per_unit"`
 	ExprVersion               int            `json:"expr_version"`
+	ProcurementCost           bool           `json:"procurement_cost,omitempty"`
 	TaskUsageBilling          bool           `json:"task_usage_billing,omitempty"`
 	UsageFacts                map[string]any `json:"usage_facts,omitempty"`
 }

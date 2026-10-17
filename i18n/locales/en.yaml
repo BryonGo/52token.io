@@ -73,3 +73,6 @@ channel.upstream_update_added_models: "Added model examples (showing {{.Shown}}/
 channel.upstream_update_removed_models: "Removed model examples (showing {{.Shown}}/{{.Total}}): {{.Models}}"
 channel.upstream_update_failed_channels: "Failed channel IDs (showing {{.Shown}}/{{.Total}}): {{.Ids}}"
 channel.upstream_update_more_omitted: " ({{.Count}} more omitted)"
+
+catalog.temporarily_unavailable: "Model catalog is temporarily unavailable"
+catalog.pricing_id_not_found: "Pricing ID was not found in the active model catalog"

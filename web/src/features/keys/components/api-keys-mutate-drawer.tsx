@@ -1,21 +1,3 @@
-/*
-Copyright (C) 2023-2026 QuantumNous
-
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as
-published by the Free Software Foundation, either version 3 of the
-License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU Affero General Public License for more details.
-
-You should have received a copy of the GNU Affero General Public License
-along with this program. If not, see <https://www.gnu.org/licenses/>.
-
-For commercial licensing, please contact support@quantumnous.com
-*/
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useQuery } from '@tanstack/react-query'
 import { ChevronDown, KeyRound, Settings2, WalletCards } from 'lucide-react'
@@ -41,6 +23,25 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from '@/components/ui/collapsible'
+/*
+Copyright (C) 2023-2026 QuantumNous
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+For commercial licensing, please contact support@quantumnous.com
+*/
+import { Combobox } from '@/components/ui/combobox'
 import {
   Form,
   FormControl,
@@ -78,6 +79,7 @@ import {
   updateApiKey,
   getApiKey,
   getTokenAutoGroups,
+  getKeyProjects,
 } from '../api'
 import { ERROR_MESSAGES, SUCCESS_MESSAGES } from '../constants'
 import {
@@ -109,7 +111,12 @@ export function ApiKeysMutateDrawer({
   const { t } = useTranslation()
   const isUpdate = !!currentRow
   const currentRowId = currentRow?.id
-  const { triggerRefresh } = useApiKeys()
+  const { triggerRefresh, projectId } = useApiKeys()
+  const projects = useQuery({
+    queryKey: ['key-projects'],
+    queryFn: async () => requireServerSuccess(await getKeyProjects()),
+    enabled: open,
+  })
   const { status, loading: statusLoading } = useStatus()
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
@@ -166,7 +173,7 @@ export function ApiKeysMutateDrawer({
     () =>
       Object.entries(groupsData?.data || {}).map(([key, info]) => ({
         value: key,
-        label: key,
+        label: info.name || key,
         desc: info.desc ? translateServerText(t, info.desc) : key,
         ratio: info.ratio,
       })),
@@ -236,9 +243,10 @@ export function ApiKeysMutateDrawer({
         setInitializedTarget(target)
       }
     } else {
-      form.reset(
-        getApiKeyFormDefaultValues(defaultUseAutoGroup && backendHasAuto)
-      )
+      form.reset({
+        ...getApiKeyFormDefaultValues(defaultUseAutoGroup && backendHasAuto),
+        project_id: projectId ?? 0,
+      })
       setInitializedTarget(target)
     }
   }, [
@@ -259,30 +267,13 @@ export function ApiKeysMutateDrawer({
     availableAutoGroupNames,
     maxAutoGroups,
     initializedTarget,
+    projectId,
   ])
 
   const formTarget =
     isUpdate && currentRow ? `update:${currentRow.id}` : 'create'
   const isFormInitialized = initializedTarget === formTarget
   const selectedGroup = form.watch('group')
-
-  // Correct group after groups load: if the form value is not in available groups, fall back
-  useEffect(() => {
-    if (groups.length === 0) return
-    const currentGroup = selectedGroup
-    if (currentGroup && !groups.some((g) => g.value === currentGroup)) {
-      const fallback =
-        groups.find((g) => g.value === 'default')?.value ??
-        groups[0]?.value ??
-        ''
-      form.setValue('group', fallback)
-      if (currentGroup === 'auto') {
-        form.setValue('auto_groups', [])
-        form.setValue('auto_groups_mode', 'inherit')
-        form.setValue('cross_group_retry', false)
-      }
-    }
-  }, [groups, form, selectedGroup])
 
   const onSubmit = async (data: ApiKeyFormValues) => {
     setIsSubmitting(true)
@@ -419,6 +410,37 @@ export function ApiKeysMutateDrawer({
                 )}
               />
 
+              <FormField
+                control={form.control}
+                name='project_id'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>{t('Project')}</FormLabel>
+                    <FormControl>
+                      <Combobox
+                        openOnFocus
+                        value={String(field.value ?? 0)}
+                        onValueChange={(value) => field.onChange(Number(value))}
+                        options={[
+                          { value: '0', label: t('Unassigned') },
+                          ...(projects.data?.data || []).map((p) => ({
+                            value: String(p.id),
+                            label: p.name,
+                          })),
+                        ]}
+                        placeholder={t('Select project')}
+                        disabled={projects.isPending || projects.isError}
+                      />
+                    </FormControl>
+                    <FormDescription>
+                      {t(
+                        'Projects organize keys and usage reports. They do not change groups, multipliers or routing.'
+                      )}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
               <FormField
                 control={form.control}
                 name='group'

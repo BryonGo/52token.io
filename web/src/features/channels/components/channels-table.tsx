@@ -46,6 +46,7 @@ import { useMediaQuery } from '@/hooks'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
 import { requireServerSuccess } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
+import { useGroupLabelStore } from '@/stores/group-label-store'
 
 import { getChannels, searchChannels, getGroups } from '../api'
 import {
@@ -90,6 +91,7 @@ function isDisabledChannelRow(channel: Channel) {
 
 export function ChannelsTable() {
   const { t } = useTranslation()
+  const groupLabels = useGroupLabelStore((s) => s.labels)
   const {
     enableTagMode,
     idSort,
@@ -213,10 +215,10 @@ export function ChannelsTable() {
   const groupOptions = useMemo(
     () =>
       (groupsData?.data || []).map((g) => ({
-        label: g,
+        label: groupLabels[g]?.name || g,
         value: g,
       })),
-    [groupsData]
+    [groupsData, groupLabels]
   )
 
   // Fetch channels data

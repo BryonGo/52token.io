@@ -28,9 +28,11 @@ import type { KeyboardEvent, PointerEvent, ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Button } from '@/components/ui/button'
+import { useGroupLabelStore } from '@/stores/group-label-store'
 
 type AutoGroupOrderItemProps = {
   group: string
+  label?: string
   index: number
   count: number
   leading?: ReactNode
@@ -41,6 +43,10 @@ type AutoGroupOrderItemProps = {
 
 export function AutoGroupOrderItem(props: AutoGroupOrderItemProps) {
   const { t } = useTranslation()
+  const displayName =
+    useGroupLabelStore((s) => s.labels[props.group]?.name) ||
+    props.label ||
+    props.group
   const dragControls = useDragControls()
 
   const handleDragStart = (event: PointerEvent<HTMLButtonElement>) => {
@@ -71,8 +77,8 @@ export function AutoGroupOrderItem(props: AutoGroupOrderItemProps) {
         variant='ghost'
         size='icon-sm'
         className='text-muted-foreground cursor-grab touch-none font-mono active:cursor-grabbing'
-        aria-label={t('Drag {{group}} to reorder', { group: props.group })}
-        title={t('Drag {{group}} to reorder', { group: props.group })}
+        aria-label={t('Drag {{group}} to reorder', { group: displayName })}
+        title={t('Drag {{group}} to reorder', { group: displayName })}
         onPointerDown={handleDragStart}
         onKeyDown={handleDragKeyDown}
       >
@@ -82,9 +88,9 @@ export function AutoGroupOrderItem(props: AutoGroupOrderItemProps) {
       <div className='flex min-w-0 flex-1 flex-wrap items-center gap-2'>
         <span
           className='min-w-0 truncate text-sm font-medium'
-          title={props.group}
+          title={displayName}
         >
-          {props.group}
+          {displayName}
         </span>
         {props.children}
       </div>
@@ -94,7 +100,7 @@ export function AutoGroupOrderItem(props: AutoGroupOrderItemProps) {
           variant='ghost'
           size='icon-sm'
           disabled={props.index === 0}
-          aria-label={t('Move {{group}} up', { group: props.group })}
+          aria-label={t('Move {{group}} up', { group: displayName })}
           onClick={() => props.onMove(props.index, 'up')}
         >
           <HugeiconsIcon
@@ -108,7 +114,7 @@ export function AutoGroupOrderItem(props: AutoGroupOrderItemProps) {
           variant='ghost'
           size='icon-sm'
           disabled={props.index === props.count - 1}
-          aria-label={t('Move {{group}} down', { group: props.group })}
+          aria-label={t('Move {{group}} down', { group: displayName })}
           onClick={() => props.onMove(props.index, 'down')}
         >
           <HugeiconsIcon
@@ -121,7 +127,7 @@ export function AutoGroupOrderItem(props: AutoGroupOrderItemProps) {
           type='button'
           variant='ghost'
           size='icon-sm'
-          aria-label={t('Remove {{group}}', { group: props.group })}
+          aria-label={t('Remove {{group}}', { group: displayName })}
           onClick={() => props.onRemove(props.group)}
         >
           <HugeiconsIcon

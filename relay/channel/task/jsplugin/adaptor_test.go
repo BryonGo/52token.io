@@ -1966,7 +1966,7 @@ func TestTaskSubmitStreamCancellationClosesReader(t *testing.T) {
 	defer writer.Close()
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	_, err = New(plugin).readSubmitEvents(ctx, &http.Response{Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: reader}, nil)
+	_, err = New(plugin).readSubmitEvents(ctx, &http.Response{Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: reader}, nil, maxTaskPluginPersistedJSONBytes)
 	require.ErrorIs(t, err, context.Canceled)
 	_, err = writer.Write([]byte("data: {}\n\n"))
 	require.Error(t, err)
@@ -1980,7 +1980,7 @@ func TestTaskSubmitStreamIdleTimeout(t *testing.T) {
 	require.NoError(t, err)
 	reader, writer := io.Pipe()
 	defer writer.Close()
-	_, err = New(plugin).readSubmitEvents(t.Context(), &http.Response{Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: reader}, nil)
+	_, err = New(plugin).readSubmitEvents(t.Context(), &http.Response{Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: reader}, nil, maxTaskPluginPersistedJSONBytes)
 	require.ErrorContains(t, err, "idle timeout")
 }
 

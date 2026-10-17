@@ -54,13 +54,38 @@ const referenceSchema = z.object({
   schedule: z.enum(['deepseek', 'off_peak']),
   local_group_billing: z.boolean(),
 })
+const modelRulesSchema = z.record(
+  z.string().min(1).max(256),
+  z.object({
+    expression: z.string().min(1).max(16384),
+    usage_schema: z.record(z.string(), z.record(z.string(), z.unknown())),
+    document_url: z.url(),
+  })
+)
 const sourceSchema = z.object({
+  local_group_billing: z.boolean(),
+  model_rules_json: z.string().refine((value) => {
+    if (!value.trim()) return true
+    try {
+      return modelRulesSchema.safeParse(JSON.parse(value)).success
+    } catch {
+      return false
+    }
+  }, 'Invalid documented model price rules'),
+  advanced_pricing: z.boolean(),
   id: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/),
   name: z.string().min(1).max(120),
   enabled: z.boolean(),
   format: z.enum(['json', 'newapi', 'sub2api', 'deepseek_html']),
   url: z.url(),
   channel_origin: z.url(),
+  filter_field: z.string().max(160),
+  filter_value: z.string().max(128),
+  filter_exclude: z.boolean(),
+  auth_token: z.string().max(2048),
+  auth_user_id: z.number().int().min(1).max(2147483647).optional(),
+  price_currency: z.enum(['CNY', 'USD', 'CREDIT']).optional(),
+  default_credits_per_cny: z.number().min(0.000001).max(1e6).optional(),
   status_url: z.union([z.literal(''), z.url()]),
   unit_tokens: z.number().positive().max(1e9),
   input_scale: z.number().positive().max(1e9),
@@ -86,6 +111,9 @@ const sourceSchema = z.object({
     vendor_name: z.string(),
     vendor_icon: z.string(),
     request_price: z.string(),
+    request_unit: z.string(),
+    request_units: z.string(),
+    usage_schema: z.string(),
     quota_type: z.string(),
     items: z.string(),
     model: z.string(),
@@ -104,9 +132,18 @@ const sourceSchema = z.object({
 })
 type PriceSourceForm = z.infer<typeof sourceSchema>
 function sourceFromForm(values: PriceSourceForm): PriceSource {
-  const { reference_json, ...source } = values
+  const {
+    reference_json,
+    model_rules_json,
+    auth_token: _token,
+    auth_user_id: _uid,
+    ...source
+  } = values
   return {
     ...source,
+    model_rules: model_rules_json.trim()
+      ? modelRulesSchema.parse(JSON.parse(model_rules_json))
+      : undefined,
     reference: reference_json.trim()
       ? referenceSchema.parse(JSON.parse(reference_json))
       : undefined,
@@ -125,6 +162,9 @@ const newApiFields = {
   vendor_name: 'name',
   vendor_icon: 'icon',
   request_price: 'model_price',
+  request_unit: 'request_price_display_unit',
+  request_units: 'request_price_units',
+  usage_schema: 'billing_usage_schema',
   quota_type: 'quota_type',
   items: 'data',
   model: 'model_name',
@@ -155,6 +195,9 @@ const sub2apiFields = {
 }
 function newSource(): PriceSourceForm {
   return {
+    advanced_pricing: true,
+    local_group_billing: false,
+    model_rules_json: '',
     id: '',
     name: '',
     enabled: true,
@@ -162,6 +205,13 @@ function newSource(): PriceSourceForm {
     url: '',
     channel_origin: '',
     status_url: '',
+    default_credits_per_cny: 1,
+    price_currency: 'CREDIT',
+    filter_field: '',
+    filter_value: '',
+    filter_exclude: false,
+    auth_token: '',
+    auth_user_id: undefined,
     unit_tokens: 1_000_000,
     input_scale: 1,
     output_ratio: false,
@@ -209,6 +259,8 @@ export function PriceSourceManager() {
           await api.put('/api/channel/price-sources', {
             source,
             expected_version: query.data?.version,
+            auth_token: form.getValues('auth_token') || undefined,
+            auth_user_id: form.getValues('auth_user_id'),
           })
         ).data
       )
@@ -229,6 +281,8 @@ export function PriceSourceManager() {
           await api.post('/api/channel/price-sources/preview', {
             source,
             group,
+            auth_token: form.getValues('auth_token') || undefined,
+            auth_user_id: form.getValues('auth_user_id'),
           })
         ).data
       ).data as Preview,
@@ -242,6 +296,20 @@ export function PriceSourceManager() {
       defaults = {
         ...defaults,
         ...source,
+        advanced_pricing: source.advanced_pricing ?? false,
+        local_group_billing: source.local_group_billing ?? false,
+        model_rules_json: source.model_rules
+          ? JSON.stringify(source.model_rules, null, 2)
+          : '',
+        filter_field: source.filter_field ?? '',
+        filter_value: source.filter_value ?? '',
+        filter_exclude: source.filter_exclude ?? false,
+        auth_token: '',
+        auth_user_id: source.auth_user_id,
+        default_credits_per_cny: source.default_credits_per_cny,
+        price_currency:
+          source.price_currency ??
+          (source.format === 'deepseek_html' ? 'CNY' : 'CREDIT'),
         reference_json: source.reference
           ? JSON.stringify(source.reference, null, 2)
           : '',
@@ -309,7 +377,14 @@ export function PriceSourceManager() {
       <Table>
         <TableHeader>
           <TableRow>
-            {['Name', 'Price source', 'Status', 'Actions'].map((label) => (
+            {[
+              'Name',
+              'Price source',
+              'Upstream price currency',
+              'Default upstream credits received per CNY 1',
+              'Status',
+              'Actions',
+            ].map((label) => (
               <TableHead key={label}>{t(label)}</TableHead>
             ))}
           </TableRow>
@@ -324,6 +399,13 @@ export function PriceSourceManager() {
               <TableCell className='max-w-sm text-xs break-all'>
                 {source.url}
               </TableCell>
+              <TableCell>
+                {source.price_currency === 'CREDIT' ||
+                (!source.price_currency && source.format !== 'deepseek_html')
+                  ? t('Platform credits')
+                  : (source.price_currency ?? 'CNY')}
+              </TableCell>
+              <TableCell>{source.default_credits_per_cny ?? '—'}</TableCell>
               <TableCell>
                 {t(source.enabled ? 'Enabled' : 'Disabled')}
               </TableCell>
@@ -408,6 +490,74 @@ export function PriceSourceManager() {
                 )}
               </p>
             </div>
+            <FormField
+              control={form.control}
+              name='local_group_billing'
+              render={({ field }) => (
+                <FormItem className='flex items-center justify-between gap-3'>
+                  <FormLabel>
+                    {t(
+                      'Keep base prices and apply the local group multiplier once'
+                    )}
+                  </FormLabel>
+                  <FormControl>
+                    <Switch
+                      checked={field.value}
+                      onCheckedChange={field.onChange}
+                      disabled={busy}
+                    />
+                  </FormControl>
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name='model_rules_json'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>
+                    {t('Documented model price rules (optional JSON)')}
+                  </FormLabel>
+                  <p className='text-muted-foreground text-xs'>
+                    {t(
+                      'Rules apply only to exact model IDs in this source. Use synchronized base price placeholders and record the upstream document URL.'
+                    )}
+                  </p>
+                  <FormControl>
+                    <JsonCodeEditor
+                      value={field.value}
+                      onChange={field.onChange}
+                      onBlur={field.onBlur}
+                      name={field.name}
+                      textareaRef={field.ref}
+                      disabled={busy}
+                      ariaLabel={t(
+                        'Documented model price rules (optional JSON)'
+                      )}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name='advanced_pricing'
+              render={({ field }) => (
+                <FormItem className='flex items-center justify-between gap-3'>
+                  <FormLabel>
+                    {t('Preserve dynamic and quantity-based pricing')}
+                  </FormLabel>
+                  <FormControl>
+                    <Switch
+                      checked={field.value}
+                      onCheckedChange={field.onChange}
+                      disabled={busy}
+                    />
+                  </FormControl>
+                </FormItem>
+              )}
+            />
             <div className='grid gap-4 sm:grid-cols-2'>
               {(
                 ['id', 'name', 'url', 'channel_origin', 'status_url'] as const
@@ -457,6 +607,9 @@ export function PriceSourceManager() {
                           value === 'deepseek_html'
                         ) {
                           field.onChange(value)
+                          if (value === 'deepseek_html') {
+                            form.setValue('price_currency', 'CNY')
+                          }
                           if (value !== 'deepseek_html') {
                             form.setValue('reference_json', '')
                           }
@@ -495,6 +648,150 @@ export function PriceSourceManager() {
                         </SelectItem>
                       </SelectContent>
                     </Select>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              {(['filter_field', 'filter_value'] as const).map((name) => (
+                <FormField
+                  key={name}
+                  control={form.control}
+                  name={name}
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>
+                        {t(
+                          name === 'filter_field'
+                            ? 'Model filter field (optional)'
+                            : 'Model filter value'
+                        )}
+                      </FormLabel>
+                      <FormControl>
+                        <Input {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              ))}
+              <FormField
+                control={form.control}
+                name='filter_exclude'
+                render={({ field }) => (
+                  <FormItem className='flex items-center justify-between'>
+                    <FormLabel>{t('Exclude matching models')}</FormLabel>
+                    <FormControl>
+                      <Switch
+                        checked={field.value}
+                        onCheckedChange={field.onChange}
+                      />
+                    </FormControl>
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name='auth_user_id'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>
+                      {t('Upstream administrator user ID (optional)')}
+                    </FormLabel>
+                    <FormControl>
+                      <Input
+                        type='number'
+                        min={1}
+                        value={field.value ?? ''}
+                        onChange={(e) =>
+                          field.onChange(
+                            e.target.value === ''
+                              ? undefined
+                              : e.target.valueAsNumber
+                          )
+                        }
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name='auth_token'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>
+                      {t('Upstream administrator access token (optional)')}
+                    </FormLabel>
+                    <FormControl>
+                      <Input
+                        type='password'
+                        autoComplete='new-password'
+                        {...field}
+                      />
+                    </FormControl>
+                    <p className='text-muted-foreground text-xs'>
+                      {t(
+                        'Saved credentials are never returned. Leave blank to keep them. Enter credentials again after changing pricing endpoints.'
+                      )}
+                    </p>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name='price_currency'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>{t('Upstream price currency')}</FormLabel>
+                    <Select value={field.value} onValueChange={field.onChange}>
+                      <FormControl>
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                      </FormControl>
+                      <SelectContent>
+                        <SelectItem value='CREDIT'>
+                          {t('Platform credits')}
+                        </SelectItem>
+                        <SelectItem value='CNY'>CNY</SelectItem>
+                        <SelectItem value='USD'>USD</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name='default_credits_per_cny'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>
+                      {t('Default upstream credits received per CNY 1')}
+                    </FormLabel>
+                    <FormControl>
+                      <Input
+                        type='number'
+                        min='0.000001'
+                        max='1000000'
+                        step='any'
+                        value={field.value ?? ''}
+                        onChange={(event) =>
+                          field.onChange(
+                            event.target.value === ''
+                              ? undefined
+                              : event.target.valueAsNumber
+                          )
+                        }
+                      />
+                    </FormControl>
+                    <p className='text-muted-foreground text-xs'>
+                      {t(
+                        'Used only for new channel cost settings. Existing channel recharge ratios stay unchanged.'
+                      )}
+                    </p>
                     <FormMessage />
                   </FormItem>
                 )}

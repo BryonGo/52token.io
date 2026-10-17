@@ -35,6 +35,8 @@ func serveTaskPluginImageProtocol(c *gin.Context, pinned pluginruntime.PinnedEnd
 		respondPluginProtocolError(c, http.StatusInternalServerError, "task_protocol_error", "Task protocol request failed")
 		return
 	}
+	stream, cleanup := beginTaskSubmitStream(c, protocolRequest.Stream)
+	defer cleanup()
 	clientRequest := c.Request
 	var relayInfo *relaycommon.RelayInfo
 	var relayInfoErr error
@@ -85,6 +87,9 @@ func serveTaskPluginImageProtocol(c *gin.Context, pinned pluginruntime.PinnedEnd
 		return
 	}
 	if taskErr != nil {
+		if stream.writeError(taskErr) {
+			return
+		}
 		respondTaskPluginImageError(c, taskErr)
 		return
 	}
@@ -111,6 +116,9 @@ func serveTaskPluginImageProtocol(c *gin.Context, pinned pluginruntime.PinnedEnd
 		taskErr = service.TaskErrorWrapper(errors.New(reason), "image_generation_failed", http.StatusBadRequest, common.UpstreamAddresses(c)...)
 		taskErr.LocalError = true
 		respondTaskPluginImageError(c, taskErr)
+		return
+	}
+	if stream.finish() {
 		return
 	}
 	view, err := service.BuildTaskPluginView(task)

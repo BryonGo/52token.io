@@ -62,6 +62,13 @@ describe('channel cost settings', () => {
   test('enabling HappyAPI records five credits per yuan and preserves other settings', async () => {
     const save = vi.fn()
     render(<Settings onSave={save} />)
+    await waitFor(() =>
+      expect(
+        screen.getByRole('switch', {
+          name: 'Charge actual cost without markup',
+        })
+      ).not.toHaveAttribute('aria-disabled', 'true')
+    )
     fireEvent.click(
       screen.getByRole('switch', { name: 'Charge actual cost without markup' })
     )
@@ -152,6 +159,11 @@ test('Sub2API defaults to its own origin-bound source and one credit per yuan', 
   await screen.findByRole('switch', {
     name: 'Charge actual cost without markup',
   })
+  await waitFor(() =>
+    expect(
+      screen.getByRole('switch', { name: 'Charge actual cost without markup' })
+    ).not.toHaveAttribute('aria-disabled', 'true')
+  )
   fireEvent.click(
     screen.getByRole('switch', { name: 'Charge actual cost without markup' })
   )
@@ -173,4 +185,99 @@ test('Sub2API defaults to its own origin-bound source and one credit per yuan', 
     credits_per_cny: 1,
     upstream_group: 'POJIAAI-国模破甲',
   })
+})
+
+test.each([
+  ['relay88', '88API', 'https://api.88api.ai', 66],
+  ['newtoken', 'NewToken', 'https://newtoken.club', 61],
+])(
+  'new %s channels use their own source and its 1:1 recharge default',
+  async (id, name, origin, type) => {
+    vi.mocked(api.get).mockResolvedValue({
+      data: {
+        success: true,
+        data: {
+          version: 'v1',
+          sources: [
+            {
+              id,
+              name,
+              format: 'newapi',
+              enabled: true,
+              channel_origin: origin,
+              default_credits_per_cny: 1,
+            },
+          ],
+        },
+      },
+    })
+    const save = vi.fn()
+    render(<Settings onSave={save} type={type} baseUrl={origin} />)
+    await screen.findByRole('switch', {
+      name: 'Charge actual cost without markup',
+    })
+    await waitFor(() =>
+      expect(
+        screen.getByRole('switch', {
+          name: 'Charge actual cost without markup',
+        })
+      ).not.toHaveAttribute('aria-disabled', 'true')
+    )
+    fireEvent.click(
+      screen.getByRole('switch', { name: 'Charge actual cost without markup' })
+    )
+    await screen.findByText(name)
+    expect(
+      screen.getByRole('spinbutton', {
+        name: 'Upstream credits received per CNY 1',
+      })
+    ).toHaveValue(1)
+    fireEvent.change(
+      screen.getByRole('textbox', { name: 'Upstream token group' }),
+      { target: { value: 'actual-group' } }
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(save).toHaveBeenCalled())
+    expect(JSON.parse(save.mock.calls[0][0]).cost_billing).toEqual({
+      enabled: true,
+      source: id,
+      credits_per_cny: 1,
+      upstream_group: 'actual-group',
+    })
+  }
+)
+
+test('a source with unconfirmed purchase conversion leaves the recharge field blank', async () => {
+  vi.mocked(api.get).mockResolvedValue({
+    data: {
+      success: true,
+      data: {
+        version: 'v1',
+        sources: [
+          {
+            id: 'artapi',
+            name: 'ArtAPI',
+            enabled: true,
+            format: 'newapi',
+            channel_origin: 'https://video.artapi.fun',
+            price_currency: 'CREDIT',
+          },
+        ],
+      },
+    },
+  })
+  render(<Settings onSave={vi.fn()} baseUrl='https://video.artapi.fun' />)
+  await waitFor(() =>
+    expect(
+      screen.getByRole('switch', { name: 'Charge actual cost without markup' })
+    ).not.toHaveAttribute('aria-disabled', 'true')
+  )
+  fireEvent.click(
+    screen.getByRole('switch', { name: 'Charge actual cost without markup' })
+  )
+  expect(
+    screen.getByRole('spinbutton', {
+      name: 'Upstream credits received per CNY 1',
+    })
+  ).toHaveValue(null)
 })

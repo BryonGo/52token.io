@@ -15,6 +15,9 @@ export const SOURCE_FIELD_LABELS = {
   vendor_name: 'Vendor list name field',
   vendor_icon: 'Vendor list icon field',
   request_price: 'Price per request field',
+  request_unit: 'Request price unit field',
+  request_units: 'Request price unit count field',
+  usage_schema: 'Upstream usage schema field',
   quota_type: 'Billing unit field',
   items: 'Model list path',
   model: 'Model name field',
@@ -32,12 +35,30 @@ export const SOURCE_FIELD_LABELS = {
 } as const
 export type SourceField = keyof typeof SOURCE_FIELD_LABELS
 export type PriceSource = {
+  local_group_billing?: boolean
+  model_rules?: Record<
+    string,
+    {
+      expression: string
+      usage_schema: Record<string, Record<string, unknown>>
+      document_url: string
+    }
+  >
+
+  advanced_pricing?: boolean
   id: string
   name: string
   enabled: boolean
   format: 'json' | 'newapi' | 'sub2api' | 'deepseek_html'
   url: string
   channel_origin: string
+  filter_field?: string
+  filter_value?: string
+  filter_exclude?: boolean
+  auth_configured?: boolean
+  auth_user_id?: number
+  price_currency?: 'CNY' | 'USD' | 'CREDIT'
+  default_credits_per_cny?: number
   status_url: string
   unit_tokens: number
   input_scale: number

@@ -980,3 +980,65 @@ it('applies the POJIA local 0.08 group once to the channel base CNY price', () =
     /¥1.08\s*\/\s*1M/
   )
 })
+
+it('applies a fractional local group once to a synchronized fixed CNY image price', () => {
+  useSystemConfigStore
+    .getState()
+    .setConfig({
+      currency: {
+        ...DEFAULT_CURRENCY_CONFIG,
+        quotaDisplayType: 'CNY',
+        usdExchangeRate: 7,
+      },
+    })
+  const model = pricingModel({
+    model_name: 'image-local',
+    quota_type: 1,
+    enable_groups: ['image'],
+    group_ratio: { image: 0.55 },
+    channel_cost: { local_group_billing: true, cny_request_price: 0.306 },
+  })
+  render(
+    <ModelCard
+      model={model}
+      tokenUnit='M'
+      selectedGroup='image'
+      priceRate={7}
+      usdExchangeRate={7}
+      showRechargePrice
+      onClick={vi.fn()}
+    />
+  )
+  expect(screen.getByText(/¥0.1683/)).toBeVisible()
+  expect(screen.queryByText(/¥0.092565/)).not.toBeInTheDocument()
+})
+
+it('shows a synchronized per-second CNY price without applying display FX again', () => {
+  useSystemConfigStore.getState().setConfig({
+    currency: {
+      ...DEFAULT_CURRENCY_CONFIG,
+      quotaDisplayType: 'CNY',
+      usdExchangeRate: 7,
+    },
+  })
+  render(
+    <ModelCard
+      model={pricingModel({
+        model_name: 'video-ultra-720p',
+        channel_id: 133,
+        billing_mode: 'tiered_expr',
+        billing_expr: 'tier("second", u("seconds") * 0.5)',
+        billing_usage_schema: { seconds: { type: 'number', unit: 'second' } },
+        channel_cost: { expression: 'tier("second", u("seconds") * 0.5)' },
+      })}
+      onClick={vi.fn()}
+      tokenUnit='M'
+      priceRate={7}
+      usdExchangeRate={7}
+    />
+  )
+  expect(screen.getByText('¥0.5')).toBeVisible()
+  expect(screen.getByText(/^\/\s*s$/)).toBeVisible()
+  expect(screen.queryByText('Input')).not.toBeInTheDocument()
+  expect(screen.queryByText('¥3.5')).not.toBeInTheDocument()
+})

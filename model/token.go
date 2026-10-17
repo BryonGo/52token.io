@@ -12,6 +12,7 @@ import (
 )
 
 type Token struct {
+	ProjectID          int            `json:"project_id" gorm:"index;default:0"`
 	Id                 int            `json:"id"`
 	UserId             int            `json:"user_id" gorm:"index"`
 	Key                string         `json:"key" gorm:"type:varchar(128);uniqueIndex"`
@@ -158,7 +159,7 @@ func validateLikePattern(input string) error {
 
 const searchHardLimit = 100
 
-func SearchUserTokens(userId int, keyword string, token string, offset int, limit int) (tokens []*Token, total int64, err error) {
+func SearchUserTokens(userId int, keyword string, token string, offset int, limit int, projectIDs ...int) (tokens []*Token, total int64, err error) {
 	// model 层强制截断
 	if limit <= 0 || limit > searchHardLimit {
 		limit = searchHardLimit
@@ -186,6 +187,9 @@ func SearchUserTokens(userId int, keyword string, token string, offset int, limi
 	}
 
 	baseQuery := DB.Model(&Token{}).Where("user_id = ?", userId)
+	if len(projectIDs) > 0 {
+		baseQuery = baseQuery.Where("project_id = ?", projectIDs[0])
+	}
 
 	// 非空才加 LIKE 条件，空则跳过（不过滤该字段）
 	if keyword != "" {
@@ -316,7 +320,7 @@ func (token *Token) Update() (err error) {
 	}
 	return DB.Model(token).Select("name", "status", "expired_time", "remain_quota", "unlimited_quota",
 		"model_limits_enabled", "model_limits", "allow_ips", "group", "cross_group_retry", "auto_groups",
-		"allow_user_quota_query").Updates(token).Error
+		"allow_user_quota_query", "project_id").Updates(token).Error
 }
 
 func (token *Token) SelectUpdate() (err error) {

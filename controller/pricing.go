@@ -69,12 +69,22 @@ func GetPricing(c *gin.Context) {
 		}
 	}
 
+	labels := map[string]model.GroupProfile{}
+	profiles := model.GetGroupProfiles()
+	for id := range usableGroup {
+		profile := profiles[id]
+		if profile.Name == "" {
+			profile.Name = id
+		}
+		labels[id] = profile
+	}
 	c.JSON(200, gin.H{
 		"success":            true,
 		"data":               pricing,
 		"vendors":            model.GetVendors(),
 		"group_ratio":        groupRatio,
 		"usable_group":       usableGroup,
+		"group_labels":       labels,
 		"supported_endpoint": model.GetSupportedEndpointMap(),
 		"auto_groups":        service.GetUserAutoGroup(group),
 		"pricing_version":    "a42d372ccf0b5dd13ecf71203521f9d2",

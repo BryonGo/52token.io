@@ -1,3 +1,12 @@
+import { ChevronRight } from 'lucide-react'
+import { memo, useMemo, type ReactNode } from 'react'
+import { useTranslation } from 'react-i18next'
+
+import { CopyButton } from '@/components/copy-button'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardFooter, CardHeader } from '@/components/ui/card'
+import { getLobeIcon } from '@/lib/lobe-icon'
+import { cn } from '@/lib/utils'
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -16,15 +25,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { ChevronRight } from 'lucide-react'
-import { memo, useMemo, type ReactNode } from 'react'
-import { useTranslation } from 'react-i18next'
-
-import { CopyButton } from '@/components/copy-button'
-import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardFooter, CardHeader } from '@/components/ui/card'
-import { getLobeIcon } from '@/lib/lobe-icon'
-import { cn } from '@/lib/utils'
+import { useGroupLabelStore } from '@/stores/group-label-store'
 import { useSystemConfigStore } from '@/stores/system-config-store'
 
 import { DEFAULT_TOKEN_UNIT } from '../constants'
@@ -64,7 +65,10 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
   const isTokenBased = isTokenBasedModel(props.model)
   const tokenUnitLabel = tokenUnit === 'K' ? '1K' : '1M'
   const tags = parseTags(props.model.tags)
-  const groups = props.model.enable_groups || []
+  const groupLabels = useGroupLabelStore((s) => s.labels)
+  const groups = (props.model.enable_groups || []).map(
+    (id) => groupLabels[id]?.name || id
+  )
   const endpoints = props.model.supported_endpoint_types || []
   const modelIconKey = props.model.icon || props.model.vendor_icon
   const modelIcon = modelIconKey ? getLobeIcon(modelIconKey, 28) : null

@@ -1,3 +1,20 @@
+import type { ColumnDef } from '@tanstack/react-table'
+import { useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
+
+import { CopyButton } from '@/components/copy-button'
+import { BadgeListCell, TruncatedCell } from '@/components/data-table'
+import { StatusBadge } from '@/components/status-badge'
+import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
+import {
+  useCanEditModelPricing,
+  type ModelPricingConfig,
+} from '@/features/model-pricing/api'
+import { modelPricingDisplay } from '@/features/model-pricing/pricing'
+import { ModelPriceCell } from '@/features/pricing/components/model-price-cell'
+import { formatTimestampToDate } from '@/lib/format'
+import { getLobeIcon } from '@/lib/lobe-icon'
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -16,28 +33,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import type { ColumnDef } from '@tanstack/react-table'
-import { useMemo } from 'react'
-import { useTranslation } from 'react-i18next'
-
-import { CopyButton } from '@/components/copy-button'
-import { BadgeListCell, TruncatedCell } from '@/components/data-table'
-import { StatusBadge } from '@/components/status-badge'
-import { Button } from '@/components/ui/button'
-import { Checkbox } from '@/components/ui/checkbox'
-import {
-  Tooltip,
-  TooltipTrigger,
-  TooltipContent,
-} from '@/components/ui/tooltip'
-import {
-  useCanEditModelPricing,
-  type ModelPricingConfig,
-} from '@/features/model-pricing/api'
-import { modelPricingDisplay } from '@/features/model-pricing/pricing'
-import { ModelPriceCell } from '@/features/pricing/components/model-price-cell'
-import { formatTimestampToDate } from '@/lib/format'
-import { getLobeIcon } from '@/lib/lobe-icon'
+import { useGroupLabelStore } from '@/stores/group-label-store'
 
 import { getNameRuleConfig } from '../constants'
 import { parseModelTags, formatEndpointsDisplay } from '../lib'
@@ -58,6 +54,7 @@ export function useModelsColumns(
   const { t } = useTranslation()
   const canPrice = useCanEditModelPricing()
   const { setCurrentRow, setOpen } = useModels()
+  const groupLabels = useGroupLabelStore((s) => s.labels)
   const vendorMap = useMemo(
     () => new Map(vendors.map((vendor) => [vendor.id, vendor])),
     [vendors]
@@ -213,32 +210,41 @@ export function useModelsColumns(
       {
         id: 'connections',
         header: t('Channels and groups'),
-        size: 180,
+        size: 260,
         enableSorting: false,
         cell: ({ row }) => {
           const state = getModelChannelState(row.original)
+          const channels = row.original.bound_channels ?? []
+          const groups = row.original.enable_groups ?? []
+          const channelCount = t('Channels ({{count}} total)', {
+            count: channels.length,
+          })
+          const groupCount = t('Groups ({{count}} total)', {
+            count: groups.length,
+          })
           return (
-            <div className='min-w-0 text-sm'>
-              <Tooltip>
-                <TooltipTrigger
-                  render={
-                    <span
-                      tabIndex={0}
-                      title={t(state.description)}
-                      aria-description={t(state.description)}
-                      className='block whitespace-normal sm:truncate'
-                    />
-                  }
-                >
-                  {t('Channels {{channels}} · Groups {{groups}}', {
-                    channels: row.original.bound_channels?.length ?? 0,
-                    groups: row.original.enable_groups?.length ?? 0,
-                  })}
-                </TooltipTrigger>
-                <TooltipContent role='tooltip'>
-                  {t(state.description)}
-                </TooltipContent>
-              </Tooltip>
+            <div
+              className='min-w-0 space-y-2 text-sm'
+              title={t(state.description)}
+            >
+              <div role='group' aria-label={channelCount}>
+                <p className='text-muted-foreground text-xs'>{channelCount}</p>
+                <p className='wrap-anywhere whitespace-normal'>
+                  {channels.length
+                    ? channels.map((channel) => channel.name).join(' · ')
+                    : t('No available channels')}
+                </p>
+              </div>
+              <div role='group' aria-label={groupCount}>
+                <p className='text-muted-foreground text-xs'>{groupCount}</p>
+                <p className='wrap-anywhere whitespace-normal'>
+                  {groups.length
+                    ? groups
+                        .map((id) => groupLabels[id]?.name || id)
+                        .join(' · ')
+                    : t('No enabled groups')}
+                </p>
+              </div>
             </div>
           )
         },
@@ -379,5 +385,14 @@ export function useModelsColumns(
         meta: { mobileHidden: true },
       },
     ]
-  }, [t, canPrice, vendorMap, priceMap, pricingState, setCurrentRow, setOpen])
+  }, [
+    t,
+    canPrice,
+    vendorMap,
+    priceMap,
+    pricingState,
+    setCurrentRow,
+    setOpen,
+    groupLabels,
+  ])
 }

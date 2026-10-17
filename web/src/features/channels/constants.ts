@@ -39,6 +39,26 @@ export const CHANNEL_TYPE_OPENCODE_GO = 65
 
 export const CHANNEL_TYPE_NEW_API_LEGACY = 66
 
+// Intermediary services; official model providers keep their own category.
+export const RELAY_CHANNEL_TYPES: ReadonlySet<number> = new Set([
+  7,
+  20,
+  44,
+  53,
+  CHANNEL_TYPE_SUB2API,
+  CHANNEL_TYPE_NEW_API,
+  CHANNEL_TYPE_NEW_API_LEGACY,
+])
+
+export const RELAY_PROVIDER_PRESETS = [
+  {
+    key: '88api',
+    name: '88API',
+    type: CHANNEL_TYPE_NEW_API_LEGACY,
+    baseUrl: 'https://api.88api.ai',
+  },
+] as const
+
 export const CHANNEL_TYPES = {
   0: 'Unknown',
   1: 'OpenAI',

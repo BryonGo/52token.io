@@ -11,13 +11,15 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 )
 
 // readSubmitEvents owns only SSE framing and bounded JSON state. The plugin
 // interprets data, accumulates provider output and decides when it is complete.
-// No response bytes are written to the client at this boundary.
-func (a *TaskAdaptor) readSubmitEvents(parent context.Context, resp *http.Response, driverContext map[string]any) (any, error) {
+// An optional native presenter observes validated events; other callers keep
+// the existing accumulate-before-present behavior.
+func (a *TaskAdaptor) readSubmitEvents(parent context.Context, resp *http.Response, driverContext map[string]any, limit int) (any, error) {
 	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if err != nil || mediaType != "text/event-stream" {
 		return nil, fmt.Errorf("expected a text/event-stream submit response")
@@ -33,7 +35,7 @@ func (a *TaskAdaptor) readSubmitEvents(parent context.Context, resp *http.Respon
 	timer := time.AfterFunc(idleTimeout, func() { cancel(fmt.Errorf("task submit stream idle timeout")) })
 	defer timer.Stop()
 
-	scanner := helper.NewStreamScanner(resp.Body, maxTaskPluginPersistedJSONBytes+1)
+	scanner := helper.NewStreamScanner(resp.Body, limit+1)
 	hook := "parseSubmitEvent"
 	var accumulated *pluginruntime.JSONState
 	if pluginruntime.UsesSubmitEventDelta(a.plugin.Meta, a.plugin.Engine) {
@@ -56,7 +58,7 @@ func (a *TaskAdaptor) readSubmitEvents(parent context.Context, resp *http.Respon
 			firstLine = false
 		}
 		frameBytes += len(line) + 1
-		if frameBytes > maxTaskPluginPersistedJSONBytes {
+		if frameBytes > limit {
 			return nil, fmt.Errorf("task submit SSE event exceeds size limit")
 		}
 		if line != "" {
@@ -100,7 +102,7 @@ func (a *TaskAdaptor) readSubmitEvents(parent context.Context, resp *http.Respon
 		if err != nil {
 			return nil, fmt.Errorf("invalid submit stream state: %w", err)
 		}
-		if len(encoded) > maxTaskPluginPersistedJSONBytes {
+		if len(encoded) > limit {
 			return nil, fmt.Errorf("task submit stream state exceeds size limit")
 		}
 		if accumulated != nil {
@@ -127,6 +129,9 @@ func (a *TaskAdaptor) readSubmitEvents(parent context.Context, resp *http.Respon
 				return nil, err
 			}
 			state = decoded
+		}
+		if write, ok := parent.Value(relaycommon.TaskSubmitEventWriterKey{}).(relaycommon.TaskSubmitEventWriter); ok {
+			write(eventName, []byte(event["data"].(string)), done)
 		}
 		if done {
 			if accumulated != nil {

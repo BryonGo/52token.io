@@ -17,11 +17,150 @@ import (
 	builtinplugins "github.com/QuantumNous/new-api/plugins"
 	"github.com/QuantumNous/new-api/relay"
 	taskplugin "github.com/QuantumNous/new-api/relay/channel/task/jsplugin"
+	"github.com/QuantumNous/new-api/relay/channel/volcengine"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestBytePlusAndNewTokenIndependentPlugins(t *testing.T) {
+	for _, tc := range []struct{ key, name, base, imageModel, imagePath, videoModel string }{
+		{"byteplus", "BytePlus", "https://ark.ap-southeast.bytepluses.com", "seedream-4-5-251128", "/api/v3/images/generations", "dreamina-seedance-2-0-mini-260615"},
+		{"newtoken", "NewToken", "https://newtoken.club", "dola-seedream-5-0-pro-260628-1k", "/v1/images/generations", "doubao-seedance-2-0-mini-260615"},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			source, err := builtinplugins.Source(tc.key)
+			require.NoError(t, err)
+			registry := jsplugin.NewRegistry()
+			plugin, err := registry.RegisterFactory(source, jsplugin.Options{Key: tc.key})
+			require.NoError(t, err)
+			assert.Equal(t, tc.name, plugin.Meta.Name)
+			if tc.key == "newtoken" {
+				assert.Equal(t, "relay", plugin.Meta.ProviderKind)
+			} else {
+				assert.Equal(t, "provider", plugin.Meta.ProviderKind)
+			}
+			assert.Equal(t, tc.base, plugin.Meta.BaseURL)
+			assert.Empty(t, plugin.Meta.ChannelTypes, "domestic legacy channels keep their driver")
+			for _, media := range []struct{ model, path, native string }{
+				{tc.imageModel, "/v1/images/generations", "/" + tc.key + tc.imagePath},
+				{tc.videoModel, "/v1/videos", "/" + tc.key + "/api/v3/contents/generations/tasks"},
+			} {
+				_, found := registry.Generation().LookupEndpoint("POST", media.path, media.model)
+				require.True(t, found)
+				_, found = registry.Generation().LookupDeclaredRoute("POST", media.native)
+				require.True(t, found)
+				body := map[string]any{"model": media.model, "prompt": "an orange", "seconds": 5, "metadata": map[string]any{"resolution": "720p"}}
+				if media.model == tc.imageModel {
+					delete(body, "seconds")
+					delete(body, "metadata")
+				}
+				ctx := map[string]any{"baseUrl": tc.base, "apiKey": "test-only", "model": media.model, "upstreamModel": media.model, "requestBody": body}
+				value, err := plugin.Engine.Call(t.Context(), "buildSubmitRequest", ctx)
+				require.NoError(t, err)
+				path := "/api/v3/contents/generations/tasks"
+				if media.model == tc.imageModel {
+					path = tc.imagePath
+				}
+				assert.Equal(t, tc.base+path, alibabaObject(t, value)["url"])
+				assert.Equal(t, media.model, alibabaObject(t, value)["body"].(map[string]any)["model"])
+				if tc.key == "newtoken" && media.model == tc.imageModel {
+					assert.Equal(t, "1024x1024", alibabaObject(t, value)["body"].(map[string]any)["size"])
+				}
+				ctx["upstream"] = map[string]any{"kind": "new_api"}
+				value, err = plugin.Engine.Call(t.Context(), "buildSubmitRequest", ctx)
+				require.NoError(t, err)
+				assert.Equal(t, tc.base+"/"+tc.key+path, alibabaObject(t, value)["url"])
+			}
+			if tc.key == "newtoken" {
+				ctx := map[string]any{"baseUrl": tc.base, "apiKey": "test-only", "model": tc.videoModel, "upstreamModel": tc.videoModel, "requestBody": map[string]any{"model": tc.videoModel, "prompt": "an orange", "seconds": 5}}
+				value, err := plugin.Engine.Call(t.Context(), "buildSubmitRequest", ctx)
+				require.NoError(t, err)
+				assert.Equal(t, "720p", alibabaObject(t, value)["body"].(map[string]any)["resolution"])
+				ctx["requestBody"].(map[string]any)["metadata"] = map[string]any{"resolution": "1080p"}
+				_, err = plugin.Engine.Call(t.Context(), "buildSubmitRequest", ctx)
+				require.ErrorContains(t, err, "720p")
+				ctx["model"], ctx["upstreamModel"] = tc.imageModel, tc.imageModel
+				ctx["requestBody"] = map[string]any{"model": tc.imageModel, "prompt": "an orange", "size": "2048x2048"}
+				_, err = plugin.Engine.Call(t.Context(), "buildSubmitRequest", ctx)
+				require.ErrorContains(t, err, "size must be one of")
+			}
+		})
+	}
+}
+
+func TestBytePlusModelsCapabilitiesAndBaseURLs(t *testing.T) {
+	registry, plugin := newDoubaoPlugin(t)
+	const base = "https://ark.ap-southeast.bytepluses.com"
+	for _, tc := range []struct{ international, domestic, path string }{
+		{"dola-seedream-5-0-pro-260628", "doubao-seedream-5-0-pro-260628", "/v1/images/generations"},
+		{"dola-seedream-5-0-flash-260915", "doubao-seedream-5-0-flash-260915", "/v1/images/generations"},
+		{"seedream-5-0-260128", "doubao-seedream-5-0-260128", "/v1/images/generations"},
+		{"seedream-5-0-lite-260128", "doubao-seedream-5-0-lite-260128", "/v1/images/generations"},
+		{"seedream-4-5-251128", "doubao-seedream-4-5-251128", "/v1/images/generations"},
+		{"seedream-4-0-250828", "doubao-seedream-4-0-250828", "/v1/images/generations"},
+		{"dreamina-seedance-2-0-260128", "doubao-seedance-2-0-260128", "/v1/videos"},
+		{"dreamina-seedance-2-0-fast-260128", "doubao-seedance-2-0-fast-260128", "/v1/videos"},
+		{"dreamina-seedance-2-0-mini-260615", "doubao-seedance-2-0-mini-260615", "/v1/videos"},
+		{"dreamina-seedance-2-5-260628", "doubao-seedance-2-5-260628", "/v1/videos"},
+	} {
+		t.Run(tc.international, func(t *testing.T) {
+			_, found := registry.Generation().LookupEndpoint(http.MethodPost, tc.path, tc.international)
+			require.True(t, found)
+			assert.Contains(t, volcengine.ModelList, tc.international, "model is selectable when configuring a BytePlus channel")
+			a, _ := plugin.Meta.UsageForModel(tc.international)
+			b, _ := plugin.Meta.UsageForModel(tc.domestic)
+			assert.Equal(t, b, a, "capabilities match without rewriting the upstream model ID")
+		})
+	}
+	for _, suffix := range []string{"", "/", "/api/v3", "/api/v3/", "/api/v3/api/v3/"} {
+		context := map[string]any{"baseUrl": base + suffix, "model": "seedream-4-5-251128", "upstreamModel": "seedream-4-5-251128", "action": "text_to_image", "apiKey": "test-only", "requestBody": map[string]any{"model": "seedream-4-5-251128", "prompt": "a landscape"}}
+		value, err := plugin.Engine.Call(t.Context(), "buildSubmitRequest", context)
+		require.NoError(t, err)
+		assert.Equal(t, base+"/api/v3/images/generations", alibabaObject(t, value)["url"])
+		assert.Equal(t, "seedream-4-5-251128", alibabaObject(t, value)["body"].(map[string]any)["model"])
+		adaptor := volcengine.Adaptor{}
+		url, err := adaptor.GetRequestURL(&relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelBaseUrl: base + suffix}, RelayMode: relayconstant.RelayModeImagesGenerations})
+		require.NoError(t, err)
+		assert.Equal(t, base+"/api/v3/images/generations", url)
+	}
+	for _, body := range []map[string]any{
+		{"model": "dola-seedream-5-0-pro-260628", "prompt": "a landscape", "image": []any{"https://cdn.example/ref.png"}, "sequential_image_generation": "auto"},
+		{"model": "seedream-4-5-251128", "prompt": "a landscape", "size": "1K"},
+		{"model": "dola-seedream-5-0-flash-260915", "prompt": "a landscape", "stream": true},
+	} {
+		_, err := decodeDoubaoImage(t, registry, plugin, body)
+		require.Error(t, err, body["model"])
+	}
+	// Exact provider IDs select their own price ratios; sharing capabilities
+	// must not make international models inherit domestic procurement rates.
+	for _, tc := range []struct {
+		model, resolution string
+		video             bool
+		ratio             float64
+	}{
+		{"dreamina-seedance-2-0-260128", "720p", true, 4.3 / 7},
+		{"dreamina-seedance-2-0-260128", "1080p", false, 7.7 / 7},
+		{"dreamina-seedance-2-0-260128", "1080p", true, 4.7 / 7},
+		{"dreamina-seedance-2-0-260128", "4k", true, 2.4 / 7},
+		{"dreamina-seedance-2-5-260628", "720p", true, 6.4 / 10.7},
+		{"dreamina-seedance-2-0-fast-260128", "720p", true, 3.3 / 5.6},
+		{"dreamina-seedance-2-0-mini-260615", "720p", true, 2.1 / 3.5},
+		{"doubao-seedance-2-0-260128", "720p", true, 28.0 / 46},
+		{"doubao-seedance-2-5-260628", "720p", true, 42.0 / 70},
+	} {
+		content := []any{}
+		if tc.video {
+			content = append(content, map[string]any{"type": "video_url", "video_url": map[string]any{"url": "https://cdn.example/ref.mp4"}})
+		}
+		ctx := map[string]any{"model": tc.model, "upstreamModel": tc.model, "usagePurpose": "billing_ratios", "requestBody": map[string]any{"metadata": map[string]any{"resolution": tc.resolution, "content": content}}}
+		value, err := plugin.Engine.Call(t.Context(), "extractUsage", ctx)
+		require.NoError(t, err)
+		assert.InDelta(t, tc.ratio, alibabaObject(t, value)["video_input_ratio"], 1e-12, "%s %s video=%v", tc.model, tc.resolution, tc.video)
+	}
+}
 
 const (
 	doubaoImageRoute = "/doubao/api/v3/images/generations"
@@ -291,11 +430,11 @@ func TestDoubaoSeedanceUsageFacts(t *testing.T) {
 		resolutions []string
 		fields      []string
 	}{
-		{[]string{pro10, "doubao-seedance-1-0-lite-t2v", "doubao-seedance-1-0-lite-i2v"}, []string{"480p", "720p", "1080p"}, []string{"resolution", "tokens"}},
-		{[]string{pro15}, []string{"480p", "720p", "1080p"}, []string{"generate_audio", "resolution", "tokens"}},
-		{[]string{v20}, []string{"480p", "720p", "1080p", "4k"}, []string{"resolution", "tokens", "video_input"}},
-		{[]string{fast20, mini20}, []string{"480p", "720p"}, []string{"resolution", "tokens", "video_input"}},
-		{[]string{v25}, []string{"480p", "720p", "1080p"}, []string{"resolution", "tokens", "video_input"}},
+		{[]string{pro10, "doubao-seedance-1-0-lite-t2v", "doubao-seedance-1-0-lite-i2v", "seedance-1-0-pro-250528", "seedance-1-0-pro-fast-251015"}, []string{"480p", "720p", "1080p"}, []string{"resolution", "tokens"}},
+		{[]string{pro15, "seedance-1-5-pro-251215"}, []string{"480p", "720p", "1080p"}, []string{"generate_audio", "resolution", "tokens"}},
+		{[]string{v20, "dreamina-seedance-2-0-260128"}, []string{"480p", "720p", "1080p", "4k"}, []string{"resolution", "tokens", "video_input"}},
+		{[]string{fast20, mini20, "dreamina-seedance-2-0-fast-260128", "dreamina-seedance-2-0-mini-260615"}, []string{"480p", "720p"}, []string{"resolution", "tokens", "video_input"}},
+		{[]string{v25, "dreamina-seedance-2-5-260628"}, []string{"480p", "720p", "1080p"}, []string{"resolution", "tokens", "video_input"}},
 	}
 	profiled := make([]string, 0, len(plugin.Meta.Models))
 	for _, family := range families {
@@ -502,8 +641,8 @@ func TestDoubaoImageValidation(t *testing.T) {
 		wantErr string
 	}{
 		{"prompt is required", v40, map[string]any{}, "prompt is required"},
-		{"client streaming is rejected", v40, map[string]any{"prompt": "a cat", "stream": true}, "stream is not supported"},
-		{"base64 responses are not deliverable", v40, map[string]any{"prompt": "a cat", "response_format": "b64_json"}, "response_format must be url"},
+		{"pro streaming is rejected", pro, map[string]any{"prompt": "a cat", "stream": true}, "stream is not supported"},
+		{"unsupported response formats are rejected", v40, map[string]any{"prompt": "a cat", "response_format": "invalid"}, "response_format must be url or b64_json"},
 		{"5.0 pro rejects group generation", pro, map[string]any{"prompt": "a cat", "sequential_image_generation": "auto"}, "sequential_image_generation is not supported"},
 		{"5.0 pro rejects sequential_image_generation even when disabled", pro, map[string]any{"prompt": "a cat", "sequential_image_generation": "disabled"}, "sequential_image_generation is not supported"},
 		{"5.0 flash rejects group generation", flash, map[string]any{"prompt": "a cat", "sequential_image_generation": "auto"}, "sequential_image_generation is not supported"},
@@ -932,7 +1071,7 @@ func TestDoubaoOpenAIImageProtocol(t *testing.T) {
 		}{
 			{"counts other than one", v40, "generate", map[string]any{"kind": "json", "value": map[string]any{"prompt": "a cat", "n": 2}}, "n must be 1"},
 			{"multipart counts other than one", lite, "edit", map[string]any{"kind": "multipart", "fields": map[string][]string{"prompt": {"a cat"}, "image": {reference}, "n": {"4"}}}, "n must be 1"},
-			{"streaming", v40, "generate", map[string]any{"kind": "json", "value": map[string]any{"prompt": "a cat", "stream": true}}, "stream is not supported"},
+			{"unsupported pro streaming", pro, "generate", map[string]any{"kind": "json", "value": map[string]any{"prompt": "a cat", "stream": true}}, "stream is not supported"},
 			{"unknown response formats", v40, "generate", map[string]any{"kind": "json", "value": map[string]any{"prompt": "a cat", "response_format": "base64"}}, "response_format must be url or b64_json"},
 			{"edits without an image", v40, "edit", map[string]any{"kind": "json", "value": map[string]any{"prompt": "a cat"}}, "image is required"},
 			{"masks", v40, "edit", map[string]any{"kind": "json", "value": map[string]any{"prompt": "a cat", "image": reference, "mask": reference}}, "mask is not supported"},

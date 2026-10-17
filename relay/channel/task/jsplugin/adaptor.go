@@ -103,6 +103,23 @@ const maxTaskArtifacts = 64
 // maxTaskPluginPersistedJSONBytes is the shared ceiling for taskData and plugin state.
 const maxTaskPluginPersistedJSONBytes = 1 << 20
 
+// Inline image payloads are bounded separately and never stored in task rows.
+const maxTaskPluginInlineJSONBytes = 64 << 20
+
+func (a *TaskAdaptor) submitResponseLimit(c *gin.Context) int {
+	if value, exists := c.Get(pluginruntime.ContextKeyPinnedEndpoint); exists {
+		if pinned, ok := value.(pluginruntime.PinnedEndpoint); ok && pinned.Protocol == pluginruntime.ProtocolOpenAIImage {
+			return maxTaskPluginInlineJSONBytes
+		}
+	}
+	if value, exists := c.Get(pluginruntime.ContextKeyPinnedRoute); exists {
+		if pinned, ok := value.(pluginruntime.PinnedRoute); ok && pinned.Route.RetainResult != nil && !*pinned.Route.RetainResult {
+			return maxTaskPluginInlineJSONBytes
+		}
+	}
+	return maxTaskPluginPersistedJSONBytes
+}
+
 type TaskAdaptor struct {
 	plugin         *pluginruntime.LoadedPlugin
 	info           *relaycommon.RelayInfo
@@ -512,10 +529,11 @@ func (a *TaskAdaptor) ParseResponse(c *gin.Context, resp *http.Response, info *r
 	var responseBody any
 	var err error
 	streaming := a.submit != nil && a.submit.ResponseType == "sse"
+	limit := a.submitResponseLimit(c)
 	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	acceptedStream := streaming || mediaType == "text/event-stream"
 	defer func() {
-		if acceptedStream && taskErr != nil {
+		if (acceptedStream || limit > maxTaskPluginPersistedJSONBytes) && taskErr != nil {
 			taskErr.NoRetry = true
 		}
 	}()
@@ -526,11 +544,11 @@ func (a *TaskAdaptor) ParseResponse(c *gin.Context, resp *http.Response, info *r
 		// Every failure after accepting this stream is non-retryable: the
 		// upstream may already have performed billable work.
 		defer resp.Body.Close()
-		responseBody, err = a.readSubmitEvents(c.Request.Context(), resp, a.submitContext(c, info))
+		responseBody, err = a.readSubmitEvents(c.Request.Context(), resp, a.submitContext(c, info), limit)
 	} else {
 		var body []byte
-		body, err = io.ReadAll(io.LimitReader(resp.Body, maxTaskPluginPersistedJSONBytes+1))
-		if err == nil && len(body) > maxTaskPluginPersistedJSONBytes {
+		body, err = io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1))
+		if err == nil && len(body) > limit {
 			err = fmt.Errorf("task submit response exceeds size limit")
 		}
 		responseBody = string(body)
@@ -541,7 +559,7 @@ func (a *TaskAdaptor) ParseResponse(c *gin.Context, resp *http.Response, info *r
 	}
 	if err != nil {
 		failure := service.TaskErrorWrapper(err, "read_response_body_failed", http.StatusBadGateway, common.UpstreamAddresses(c)...)
-		failure.NoRetry = streaming
+		failure.NoRetry = streaming || limit > maxTaskPluginPersistedJSONBytes
 		return nil, failure
 	}
 	headers := make(map[string][]string, len(resp.Header))
@@ -578,8 +596,11 @@ func (a *TaskAdaptor) ParseResponse(c *gin.Context, resp *http.Response, info *r
 	}
 	var taskData []byte
 	if parsed.TaskData != nil {
+		if parsed.Immediate == nil || parsed.Immediate.Status != model.TaskStatusSuccess && parsed.Immediate.Status != model.TaskStatusFailure {
+			limit = maxTaskPluginPersistedJSONBytes
+		}
 		taskData, err = common.Marshal(parsed.TaskData)
-		if err != nil || len(taskData) > maxTaskPluginPersistedJSONBytes {
+		if err != nil || len(taskData) > limit {
 			if err == nil {
 				err = fmt.Errorf("task data exceeds size limit")
 			}

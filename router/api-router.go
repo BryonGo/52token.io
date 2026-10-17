@@ -286,6 +286,10 @@ func SetApiRouter(router *gin.Engine) {
 			tokenRoute.GET("/", controller.GetAllTokens)
 			tokenRoute.GET("/search", middleware.SearchRateLimit(), controller.SearchTokens)
 			tokenRoute.GET("/auto-groups", controller.GetTokenAutoGroups)
+			tokenRoute.GET("/group-labels", controller.GetGroupLabels)
+			tokenRoute.GET("/projects", controller.GetTokenProjects)
+			tokenRoute.PUT("/projects", controller.SaveTokenProject)
+			tokenRoute.GET("/project-usage", controller.GetTokenProjectUsage)
 			tokenRoute.GET("/:id", controller.GetToken)
 			tokenRoute.POST("/:id/key", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.GetTokenKey)
 			tokenRoute.POST("/", controller.AddToken)
@@ -362,6 +366,9 @@ func SetApiRouter(router *gin.Engine) {
 		groupRoute.Use(middleware.AdminAuth())
 		{
 			groupRoute.GET("/", controller.GetGroups)
+			groupRoute.GET("/managed", controller.GetManagedGroups)
+			groupRoute.PUT("/managed", middleware.RootAuth(), controller.SaveManagedGroup)
+			groupRoute.DELETE("/managed", middleware.RootAuth(), controller.DeleteManagedGroup)
 		}
 
 		prefillGroupRoute := apiRouter.Group("/prefill_group")

@@ -75,12 +75,14 @@ func SaveChannelPriceSource(c *gin.Context) {
 	var request struct {
 		Source          channelcost.Source `json:"source"`
 		ExpectedVersion string             `json:"expected_version"`
+		AuthToken       string             `json:"auth_token"`
+		AuthUserID      int                `json:"auth_user_id"`
 	}
 	if err := c.ShouldBindJSON(&request); err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	if err := model.SaveChannelPriceSource(request.Source, request.ExpectedVersion); err != nil {
+	if err := model.SaveChannelPriceSource(request.Source, request.ExpectedVersion, model.PriceSourceCredential{Token: request.AuthToken, UserID: request.AuthUserID}); err != nil {
 		common.ApiError(c, err)
 		return
 	}
@@ -89,14 +91,16 @@ func SaveChannelPriceSource(c *gin.Context) {
 }
 func PreviewChannelPriceSource(c *gin.Context) {
 	var request struct {
-		Source channelcost.Source `json:"source"`
-		Group  string             `json:"group"`
+		Source     channelcost.Source `json:"source"`
+		Group      string             `json:"group"`
+		AuthToken  string             `json:"auth_token"`
+		AuthUserID int                `json:"auth_user_id"`
 	}
 	if err := c.ShouldBindJSON(&request); err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	result, err := service.FetchPriceSource(c.Request.Context(), request.Source, request.Group)
+	result, err := service.FetchPriceSource(c.Request.Context(), request.Source, request.Group, model.PriceSourceCredential{Token: request.AuthToken, UserID: request.AuthUserID})
 	if err != nil {
 		common.ApiError(c, err)
 		return

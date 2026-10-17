@@ -46,6 +46,8 @@ import {
   CHANNEL_TYPE_OPTIONS,
   CHANNEL_TYPE_SUB2API,
   CHANNEL_TYPE_TASK_PLUGIN,
+  RELAY_CHANNEL_TYPES,
+  RELAY_PROVIDER_PRESETS,
   type ChannelProviderPresentation,
 } from '../../constants'
 import { CHANNEL_TYPE_ADVANCED_CUSTOM } from '../../lib/advanced-custom'
@@ -116,10 +118,16 @@ export function ChannelProviderPicker(props: ChannelProviderPickerProps) {
     }> = []
     for (const option of CHANNEL_TYPE_OPTIONS) {
       if (option.value === CHANNEL_TYPE_TASK_PLUGIN) {
-        if (!props.canBindPlugin || (filter !== 'all' && filter !== 'plugin')) {
+        if (
+          !props.canBindPlugin ||
+          !['all', 'plugin', 'relay'].includes(filter)
+        ) {
           continue
         }
         for (const plugin of props.plugins) {
+          const isRelay = plugin.providerKind === 'relay'
+          if (filter === 'plugin' && isRelay) continue
+          if (filter === 'relay' && !isRelay) continue
           entries.push({
             id: `plugin:${plugin.key}`,
             label: plugin.name,
@@ -139,12 +147,14 @@ export function ChannelProviderPicker(props: ChannelProviderPickerProps) {
         if (replacedTypes.has(option.value)) continue
         const isCustom =
           option.value === 8 || option.value === CHANNEL_TYPE_ADVANCED_CUSTOM
+        const isRelay = RELAY_CHANNEL_TYPES.has(option.value)
         const isGateway =
           option.value === CHANNEL_TYPE_NEW_API ||
           option.value === CHANNEL_TYPE_SUB2API
         if (filter === 'gateway' && !isGateway) continue
+        if (filter === 'relay' && !isRelay) continue
         if (filter === 'custom' && !isCustom) continue
-        if (filter === 'builtin' && isCustom) continue
+        if (filter === 'builtin' && (isCustom || isRelay)) continue
         const presentation = CHANNEL_PROVIDER_PRESENTATION[option.value]
         const extensions = getChannelPluginExtensions(
           option.value,
@@ -177,6 +187,17 @@ export function ChannelProviderPicker(props: ChannelProviderPickerProps) {
         })
       }
     }
+    if (filter === 'all' || filter === 'relay') {
+      for (const preset of RELAY_PROVIDER_PRESETS) {
+        entries.push({
+          id: `preset:${preset.key}`,
+          label: preset.name,
+          target: { kind: 'builtin', type: preset.type, preset: preset.key },
+          description: t('Connect to the OpenAI API or compatible services'),
+          searchText: `${preset.name} ${preset.key} ${preset.baseUrl}`,
+        })
+      }
+    }
     return entries.filter((entry) =>
       entry.searchText.toLocaleLowerCase().includes(keyword)
     )
@@ -201,10 +222,12 @@ export function ChannelProviderPicker(props: ChannelProviderPickerProps) {
     customType > 0 &&
     !CHANNEL_TYPE_OPTIONS.some((option) => option.value === customType)
   const showPluginStatus =
-    props.canBindPlugin && (filter === 'all' || filter === 'plugin')
+    props.canBindPlugin && ['all', 'plugin', 'relay'].includes(filter)
   let currentProviderId: string | undefined
   if (props.currentProvider?.kind === 'builtin') {
-    currentProviderId = `builtin:${props.currentProvider.type}`
+    currentProviderId = props.currentProvider.preset
+      ? `preset:${props.currentProvider.preset}`
+      : `builtin:${props.currentProvider.type}`
   } else if (props.currentProvider?.kind === 'plugin') {
     currentProviderId = `plugin:${props.currentProvider.key}`
   }
@@ -232,6 +255,9 @@ export function ChannelProviderPicker(props: ChannelProviderPickerProps) {
         )}
         <TabsTrigger value='gateway' className='h-auto'>
           {t('Gateways')}
+        </TabsTrigger>
+        <TabsTrigger value='relay' className='h-auto'>
+          {t('Relay providers')}
         </TabsTrigger>
         <TabsTrigger value='custom' className='h-auto'>
           {t('Custom')}

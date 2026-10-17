@@ -28,6 +28,7 @@ import {
 } from '@/components/ui/tooltip'
 import { useMediaQuery } from '@/hooks'
 import { cn } from '@/lib/utils'
+import { useGroupLabelStore } from '@/stores/group-label-store'
 
 import { GroupRatioBadge, type GroupRatio } from './auto-group-visuals'
 
@@ -43,6 +44,7 @@ export function ApiKeyGroupCell(props: ApiKeyGroupCellProps) {
   const isMobile = useMediaQuery('(max-width: 640px)')
 
   const group = props.group?.trim() || ''
+  const name = useGroupLabelStore((s) => s.labels[group]?.name)
   if (group !== 'auto') {
     const ratio =
       group && typeof props.ratio === 'number' ? props.ratio : undefined
@@ -50,7 +52,11 @@ export function ApiKeyGroupCell(props: ApiKeyGroupCellProps) {
       <TruncatedCell
         className={isMobile ? 'w-full' : 'max-w-50'}
         tabIndex={0}
-        tooltipContent={group || t('Follow user group')}
+        tooltipContent={
+          name && name !== group
+            ? `${name} (${t('Fixed group ID')}: ${group})`
+            : group || t('Follow user group')
+        }
         tooltipClassName='break-all'
       >
         <GroupBadge

@@ -220,6 +220,9 @@ export function AutoGroupOrderEditor(props: AutoGroupOrderEditorProps) {
             <AutoGroupOrderItem
               key={group}
               group={group}
+              label={
+                props.options.find((option) => option.value === group)?.label
+              }
               index={index}
               count={props.value.length}
               onMove={handleMove}

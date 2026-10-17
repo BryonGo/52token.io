@@ -7,23 +7,140 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
+	"github.com/QuantumNous/new-api/pkg/channelcost"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	relaytypes "github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestChannelTestCostGroupAndProtocol(t *testing.T) {
+	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
+		t.Run(dialect.kind, func(t *testing.T) {
+			if dialect.env != "" && os.Getenv(dialect.env) == "" {
+				t.Skip("set " + dialect.env)
+			}
+			db := modelManagementDB(t, dialect.kind, os.Getenv(dialect.env))
+			require.NoError(t, db.AutoMigrate(&model.Log{}))
+			oldGroups := ratio_setting.GroupRatio2JSONString()
+			oldSpecial := ratio_setting.GroupGroupRatio2JSONString()
+			oldPrice, oldFX, oldQuota := operation_setting.Price, operation_setting.USDExchangeRate, common.QuotaPerUnit
+			oldTimeout := constant.StreamingTimeout
+			constant.StreamingTimeout = 30
+			settings := model_setting.GetGlobalSettings()
+			oldPolicy, oldPass := settings.ChatCompletionsToResponsesPolicy, settings.PassThroughRequestEnabled
+			t.Cleanup(func() {
+				require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(oldGroups))
+				require.NoError(t, ratio_setting.UpdateGroupGroupRatioByJSONString(oldSpecial))
+				operation_setting.Price, operation_setting.USDExchangeRate, common.QuotaPerUnit = oldPrice, oldFX, oldQuota
+				constant.StreamingTimeout = oldTimeout
+				settings.ChatCompletionsToResponsesPolicy, settings.PassThroughRequestEnabled = oldPolicy, oldPass
+			})
+			operation_setting.Price, operation_setting.USDExchangeRate, common.QuotaPerUnit = 1, 1, 500000
+			settings.PassThroughRequestEnabled = false
+			require.NoError(t, ratio_setting.UpdateGroupGroupRatioByJSONString(`{}`))
+			user := model.User{Username: "channel-test-admin", Group: "default", Role: common.RoleRootUser, Status: common.UserStatusEnabled, Quota: 1000000}
+			require.NoError(t, db.Create(&user).Error)
+			for _, tc := range []struct {
+				name, endpoint, group  string
+				policy, stream, reject bool
+				ratio                  float64
+				credits                float64
+				channelType, quota     int
+			}{
+				{name: "chat uses channel group", ratio: .08},
+				{name: "automatic uses configured Responses policy", policy: true, ratio: .08},
+				{name: "chat streaming uses configured Responses policy", endpoint: string(constant.EndpointTypeOpenAI), policy: true, stream: true, ratio: .08},
+				{name: "invalid channel group still rejects markup", ratio: 1, reject: true},
+				{name: "HappyAPI recharge discount applies once", group: "x1 HappyAPI", ratio: 1, credits: 5, channelType: constant.ChannelTypeNewAPILegacy, quota: 4075},
+				{name: "Aizhong recharge discount applies once", group: "x1 爱中转 Claude", ratio: 1, credits: 7, channelType: constant.ChannelTypeNewAPILegacy, quota: 2911},
+				{name: "official DeepSeek remains one to one", group: "x1 DeepSeek", ratio: 1, credits: 1, channelType: constant.ChannelTypeDeepSeek, quota: 20379},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					group, channelType, credits, upstreamRatio, expectedQuota := "POJIA-test", constant.ChannelTypeSub2API, 1.0, .08, 1630
+					if tc.credits > 0 {
+						group, channelType, credits, upstreamRatio, expectedQuota = tc.group, tc.channelType, tc.credits, 1, tc.quota
+					}
+					var calls atomic.Int32
+					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						calls.Add(1)
+						expectedPath := "/v1/chat/completions"
+						if tc.policy {
+							expectedPath = "/v1/responses"
+						}
+						assert.Equal(t, expectedPath, r.URL.Path)
+						var request map[string]any
+						require.NoError(t, common.DecodeJson(r.Body, &request))
+						assert.Equal(t, "deepseek-v4-pro", request["model"])
+						if tc.policy {
+							assert.Equal(t, float64(16), request["max_output_tokens"])
+							response := `{"id":"resp-test","object":"response","model":"deepseek-v4-pro","status":"completed","output":[{"id":"msg-test","type":"message","role":"assistant","content":[{"type":"output_text","text":"OK"}]}],"usage":{"input_tokens":10000,"output_tokens":8,"total_tokens":10008,"input_tokens_details":{"cached_tokens":1000}}}`
+							if tc.stream {
+								w.Header().Set("Content-Type", "text/event-stream")
+								fmt.Fprintf(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":%s}\n\n", response)
+							} else {
+								w.Header().Set("Content-Type", "application/json")
+								_, _ = w.Write([]byte(response))
+							}
+						} else {
+							w.Header().Set("Content-Type", "application/json")
+							_, _ = w.Write([]byte(`{"id":"chat-test","object":"chat.completion","model":"deepseek-v4-pro","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10000,"completion_tokens":8,"total_tokens":10008,"prompt_tokens_details":{"cached_tokens":1000}}}`))
+						}
+					}))
+					defer server.Close()
+					channel := model.Channel{Type: channelType, Status: common.ChannelStatusEnabled, Name: tc.name, Key: "test-only", BaseURL: &server.URL, Group: group, Models: "deepseek-v4-pro"}
+					channel.SetOtherSettings(dto.ChannelOtherSettings{CostBilling: &dto.ChannelCostSettings{Enabled: true, Source: "pojia-test", CreditsPerCNY: credits, UpstreamGroup: "upstream"}})
+					require.NoError(t, db.Create(&channel).Error)
+					groups, err := common.Marshal(map[string]float64{"default": 1, group: tc.ratio})
+					require.NoError(t, err)
+					require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(string(groups)))
+					source := channelcost.Source{ID: "pojia-test", Name: "Confirmed reference", Enabled: true, Format: "deepseek_html", URL: channelcost.DeepSeekURL, ChannelOrigin: "https://upstream.example", UnitTokens: 1e6, InputScale: 1, Reference: &channelcost.ReferencePricing{LocalGroupBilling: true, GroupRatio: .08, Models: map[string]string{"deepseek-v4-pro": "deepseek-v4-pro"}, Schedule: "off_peak"}}
+					if tc.credits > 0 {
+						source.Reference = nil
+					}
+					encoded, err := common.Marshal(map[string]channelcost.Source{source.ID: source})
+					require.NoError(t, err)
+					common.OptionMap["channel_price_sources"] = string(encoded)
+					snapshot := channelcost.Snapshot{Fingerprint: model.ChannelCostFingerprint(&channel), SyncedAt: time.Now().Unix(), GroupRatio: upstreamRatio, Prices: map[string]channelcost.Price{"deepseek-v4-pro": {UpstreamModel: "deepseek-v4-pro", OffPeak: channelcost.Rates{Input: 4.5, Output: 13.5, CacheRead: .15}}}}
+					encoded, err = common.Marshal(snapshot)
+					require.NoError(t, err)
+					common.OptionMap[fmt.Sprintf("channel_cost.%d", channel.Id)] = string(encoded)
+					settings.ChatCompletionsToResponsesPolicy = model_setting.ChatCompletionsToResponsesPolicy{Enabled: tc.policy, ChannelIDs: []int{channel.Id}, ModelPatterns: []string{"^deepseek-v4-pro$"}}
+					result := testChannel(t.Context(), &channel, user.Id, "deepseek-v4-pro", tc.endpoint, tc.stream)
+					if tc.reject {
+						require.ErrorContains(t, result.localErr, "exceeds the upstream cost")
+						assert.Zero(t, calls.Load())
+						return
+					}
+					require.NoError(t, result.localErr)
+					assert.Equal(t, int32(1), calls.Load())
+					assert.Equal(t, group, common.GetContextKeyString(result.context, constant.ContextKeyUsingGroup))
+					assert.Equal(t, "default", common.GetContextKeyString(result.context, constant.ContextKeyUserGroup))
+					var log model.Log
+					require.NoError(t, db.Where("channel_id = ?", channel.Id).Last(&log).Error)
+					assert.Equal(t, group, log.Group)
+					assert.Equal(t, expectedQuota, log.Quota, "recharge discount and upstream group multiplier each apply once, including cached tokens")
+				})
+			}
+		})
+	}
+}
 
 func TestGetChannelDefaultBaseURLsUsesBuiltInDefaults(t *testing.T) {
 	originalBaseURLs := constant.ChannelBaseURLs
@@ -535,11 +652,11 @@ func TestSweepChannelModelsKeepsAFailingModelUntilItExceedsTheFailureLimit(t *te
 	assert.Empty(t, first.Disabled)
 	assert.Equal(t, map[string]int{"beta": 1}, first.Failures)
 
-	belowLimit := sweepChannelModels(context.Background(), newChannel(map[string]any{"beta": float64(maxModelFailuresBeforeParking - 1)}), probeFailingBeta, maxModelProbesPerSweep)
+	belowLimit := sweepChannelModels(context.Background(), newChannel(map[string]any{"beta": float64(maxModelFailuresBeforeParking - 2)}), probeFailingBeta, maxModelProbesPerSweep)
 	assert.Equal(t, []string{"alpha", "beta"}, belowLimit.Alive)
-	assert.Equal(t, map[string]int{"beta": maxModelFailuresBeforeParking}, belowLimit.Failures)
+	assert.Equal(t, map[string]int{"beta": maxModelFailuresBeforeParking - 1}, belowLimit.Failures)
 
-	exceeded := sweepChannelModels(context.Background(), newChannel(map[string]any{"beta": float64(maxModelFailuresBeforeParking)}), probeFailingBeta, maxModelProbesPerSweep)
+	exceeded := sweepChannelModels(context.Background(), newChannel(map[string]any{"beta": float64(maxModelFailuresBeforeParking - 1)}), probeFailingBeta, maxModelProbesPerSweep)
 	assert.Equal(t, []string{"alpha"}, exceeded.Alive)
 	assert.Equal(t, []string{"beta"}, exceeded.Disabled, "the model is parked once it failed more than the allowed number of times")
 	assert.Empty(t, exceeded.Failures, "a parked model no longer carries a failure count")
@@ -598,7 +715,7 @@ func TestSweepChannelModelsStopsAtItsProbeBudget(t *testing.T) {
 	}
 }
 
-func TestSweepChannelModelsNeverProbesGenerationModels(t *testing.T) {
+func TestSweepChannelModelsDelegatesMediaToItsSafeProbe(t *testing.T) {
 	channel := &model.Channel{Id: 5, Name: "generation-sweep"}
 	channel.Models = "gpt-image-1,chat-model"
 	channel.SetOtherInfo(map[string]any{"disabled_models": []any{"seedream-4-0"}})
@@ -612,9 +729,9 @@ func TestSweepChannelModelsNeverProbesGenerationModels(t *testing.T) {
 	sweep := sweepChannelModels(context.Background(), channel, probe, maxModelProbesPerSweep)
 
 	require.True(t, sweep.Complete)
-	assert.Equal(t, []string{"chat-model"}, probed, "probing a generation model would produce a charged output")
-	assert.Equal(t, []string{"gpt-image-1", "chat-model"}, sweep.Alive)
-	assert.Equal(t, []string{"seedream-4-0"}, sweep.Disabled)
+	assert.ElementsMatch(t, []string{"seedream-4-0", "gpt-image-1", "chat-model"}, probed, "the supplied health probe handles media using read-only discovery")
+	assert.Equal(t, []string{"gpt-image-1", "chat-model", "seedream-4-0"}, sweep.Alive)
+	assert.Empty(t, sweep.Disabled)
 }
 
 func TestSweepChannelModelsSpendsNothingAfterCancellation(t *testing.T) {
@@ -660,33 +777,6 @@ func TestSweepChannelModelsKeepsWhatItLearnedWhenTheBudgetRunsOut(t *testing.T) 
 	assert.Equal(t, []string{"parked"}, sweep.Disabled)
 }
 
-func TestChannelHealthCheckTargetNeverPicksAGenerationModel(t *testing.T) {
-	chat := &model.Channel{Name: "chat-first"}
-	chat.Models = "gpt-image-1,chat-model"
-	target, allowed := channelHealthCheckTarget(chat)
-	assert.Equal(t, "chat-model", target)
-	assert.True(t, allowed)
-
-	generationOnly := &model.Channel{Name: "images-only"}
-	generationOnly.Models = "seedream-4-0,sora-2"
-	target, allowed = channelHealthCheckTarget(generationOnly)
-	assert.Empty(t, target)
-	assert.False(t, allowed, "a channel that only serves generation models is not probed")
-
-	pinnedGeneration := &model.Channel{Name: "pinned"}
-	pinnedGeneration.Models = "chat-model"
-	pinnedGeneration.TestModel = common.GetPointer("sora-2")
-	_, allowed = channelHealthCheckTarget(pinnedGeneration)
-	assert.False(t, allowed, "even a pinned test model is not probed when it bills for generation")
-
-	pinnedChat := &model.Channel{Name: "pinned-chat"}
-	pinnedChat.Models = "chat-model"
-	pinnedChat.TestModel = common.GetPointer("gpt-5-medium")
-	target, allowed = channelHealthCheckTarget(pinnedChat)
-	assert.Equal(t, "gpt-5-medium", target)
-	assert.True(t, allowed)
-}
-
 func TestBillableGenerationModelCoversImageVideoAndAudioFamilies(t *testing.T) {
 	for _, model := range []string{
 		"gemini-3-pro-image", "gpt-image-1", "nano-banana", "doubao-seedream-4-0",
@@ -701,4 +791,127 @@ func TestBillableGenerationModelCoversImageVideoAndAudioFamilies(t *testing.T) {
 	} {
 		assert.False(t, billableGenerationModel(model), model)
 	}
+}
+
+func testModelHealthFreeDiscoveryAndRouting(t *testing.T) {
+	t.Helper()
+	var gets, posts int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			posts++
+			w.WriteHeader(500)
+			return
+		}
+		gets++
+		require.Equal(t, "/v1/models", r.URL.Path)
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"gpt-image-2"}]}`))
+	}))
+	defer server.Close()
+	channel := &model.Channel{Type: constant.ChannelTypeTaskPlugin, Status: common.ChannelStatusEnabled, Name: "Free media health", Key: "fixture-private-key", BaseURL: &server.URL, Models: "gpt-image-2,nana-banana-2_sync", Group: "default"}
+	channel.SetSetting(dto.ChannelSettings{TaskPluginKey: "newtoken"})
+	require.NoError(t, channel.Insert())
+	cfg := &dto.ChannelCostSettings{Enabled: true, Source: "newtoken", CreditsPerCNY: 1, UpstreamGroup: "default"}
+	channel.SetOtherSettings(dto.ChannelOtherSettings{CostBilling: cfg})
+	require.NoError(t, model.DB.Model(channel).Update("settings", channel.OtherSettings).Error)
+	purchased := &channelcost.Snapshot{Fingerprint: model.ChannelCostFingerprint(channel), SourceURL: "https://newtoken.club/api/pricing", SyncedAt: time.Now().Unix(), GroupRatio: 1, Prices: map[string]channelcost.Price{"gpt-image-2": {RequestPrice: new(.5)}, "nana-banana-2_sync": {RequestPrice: new(.25)}}}
+	require.NoError(t, model.SaveChannelCostSnapshot(channel.Id, purchased))
+	sibling := &model.Channel{Type: constant.ChannelTypeOpenAI, Status: common.ChannelStatusEnabled, Name: "Other supplier", Group: "other", Models: "nana-banana-2_sync"}
+	require.NoError(t, sibling.Insert())
+	t.Cleanup(func() {
+		require.NoError(t, channel.Delete())
+		require.NoError(t, sibling.Delete())
+		key := fmt.Sprintf("channel_cost.%d", channel.Id)
+		require.NoError(t, model.DB.Where(&model.Option{Key: key}).Delete(&model.Option{}).Error)
+		common.OptionMapRWMutex.Lock()
+		delete(common.OptionMap, key)
+		common.OptionMapRWMutex.Unlock()
+	})
+
+	manualRecorder := httptest.NewRecorder()
+	manualCtx, _ := gin.CreateTestContext(manualRecorder)
+	manualCtx.Request = httptest.NewRequest(http.MethodGet, "/api/channel/test/"+fmt.Sprint(channel.Id)+"?model=gpt-image-2", nil)
+	manualCtx.Params = gin.Params{{Key: "id", Value: fmt.Sprint(channel.Id)}}
+	manualCtx.Set("id", 1)
+	TestChannel(manualCtx)
+	assert.Contains(t, manualRecorder.Body.String(), "directory")
+	assert.Equal(t, 1, gets)
+	assert.Zero(t, posts)
+	require.NoError(t, model.DB.First(channel, channel.Id).Error)
+	for round := range 3 {
+		if round > 0 {
+			health := readModelHealth(channel)
+			for name, item := range health {
+				item.CheckedAt = time.Now().Add(-modelHealthInterval - time.Minute).Unix()
+				health[name] = item
+			}
+			info := channel.GetOtherInfo()
+			info["model_health"] = health
+			channel.SetOtherInfo(info)
+			require.NoError(t, model.DB.Model(channel).Update("other_info", channel.OtherInfo).Error)
+		}
+		testChannelForHealthCheck(context.Background(), channel, 0, true)
+	}
+	assert.Equal(t, 4, gets)
+	assert.Zero(t, posts, "media health must never submit a paid generation")
+
+	snapshot := model.GetChannelCostSnapshot(channel.Id)
+	require.NotNil(t, snapshot)
+	assert.Equal(t, purchased.Prices, snapshot.Prices, "parking must not change synchronized purchase prices")
+	assert.Equal(t, purchased.SyncedAt, snapshot.SyncedAt, "health checks never refresh price validity")
+	assert.Equal(t, model.ChannelCostFingerprint(channel), snapshot.Fingerprint, "surviving model pricing stays valid after routing changes")
+	receipt, _, err := snapshot.Resolve(cfg, "gpt-image-2", snapshot.Fingerprint, time.Now(), 1)
+	require.NoError(t, err)
+	assert.Equal(t, .5, *receipt.CNYRequestPrice)
+	var kept model.Channel
+	require.NoError(t, model.DB.First(&kept, sibling.Id).Error)
+	assert.Equal(t, "nana-banana-2_sync", kept.Models)
+	assert.Equal(t, common.ChannelStatusEnabled, kept.Status)
+	assert.Equal(t, common.ChannelStatusEnabled, channel.Status)
+	assert.Equal(t, "gpt-image-2", channel.Models)
+	assert.Equal(t, []string{"nana-banana-2_sync"}, readChannelDisabledModels(channel))
+	assert.Equal(t, []string{"gpt-image-2"}, model.GetGroupEnabledModels("default"))
+	previousSelfUse := operation_setting.SelfUseModeEnabled
+	operation_setting.SelfUseModeEnabled = true
+	t.Cleanup(func() { operation_setting.SelfUseModeEnabled = previousSelfUse })
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	common.SetContextKey(ctx, constant.ContextKeyTokenGroup, "default")
+	common.SetContextKey(ctx, constant.ContextKeyTokenModelLimitEnabled, true)
+	common.SetContextKey(ctx, constant.ContextKeyTokenModelLimit, map[string]bool{"gpt-image-2": true, "nana-banana-2_sync": true})
+	ListModels(ctx, constant.ChannelTypeOpenAI)
+	ids := decodeListModelsResponse(t, recorder)
+	assert.Contains(t, ids, "gpt-image-2")
+	assert.NotContains(t, ids, "nana-banana-2_sync", "a key allowlist cannot revive a parked model")
+	recorder = httptest.NewRecorder()
+	ctx, _ = gin.CreateTestContext(recorder)
+	GetModelHealth(ctx)
+	assert.Contains(t, recorder.Body.String(), "interface_only")
+	assert.Contains(t, recorder.Body.String(), "disabled")
+	assert.NotContains(t, recorder.Body.String(), "fixture-private-key")
+	// A second automatic pass within thirty minutes does no work.
+	testChannelForHealthCheck(context.Background(), channel, 0, true)
+	assert.Equal(t, 4, gets)
+	assert.Zero(t, posts)
+	stale := model.GetChannelCostSnapshot(channel.Id)
+	stale.Fingerprint = "stale-source"
+	require.NoError(t, model.SaveChannelCostSnapshot(channel.Id, stale))
+	require.NoError(t, model.SaveChannelHealthState(channel, "", channel.OtherInfo))
+	assert.Equal(t, "stale-source", model.GetChannelCostSnapshot(channel.Id).Fingerprint, "health routing cannot bless an already invalid price snapshot")
+
+}
+
+func TestModelHealthChatCooldownAndGenerationAliases(t *testing.T) {
+	ch := &model.Channel{Models: "gpt-5.6-terra", Type: constant.ChannelTypeOpenAI}
+	ch.SetOtherInfo(map[string]any{"model_health": map[string]modelHealthSample{"gpt-5.6-terra": {CheckedAt: time.Now().Unix(), Checks: 1, Successes: 1, Success: true, Method: "chat"}}})
+	calls := 0
+	sweep := sweepChannelModels(context.Background(), ch, func(context.Context, string) *relaytypes.NewAPIError { calls++; return nil }, 20)
+	assert.Zero(t, calls)
+	assert.Equal(t, []string{"gpt-5.6-terra"}, sweep.Alive)
+	mapping := `{"gpt-5.6-terra":"nana-banana-2_sync"}`
+	ch.ModelMapping = &mapping
+	assert.False(t, chatHealthProbeAllowed(ch, "gpt-5.6-terra"), "an image behind a chat-looking alias must stay read-only")
+	assert.False(t, chatHealthProbeAllowed(&model.Channel{Type: constant.ChannelTypeTaskPlugin}, "gpt-5.6-terra"))
+	assert.False(t, chatHealthProbeAllowed(&model.Channel{Type: constant.ChannelTypeOpenAI}, "unknown-alias"))
+	assert.False(t, chatHealthProbeAllowed(&model.Channel{Type: constant.ChannelTypeOpenAI}, "grok-imagine"))
 }

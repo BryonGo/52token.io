@@ -1,3 +1,16 @@
+import { ChevronDown, RotateCcw } from 'lucide-react'
+import { memo, useMemo, type ReactNode } from 'react'
+import { useTranslation } from 'react-i18next'
+
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible'
+import { getLobeIcon } from '@/lib/lobe-icon'
+import { cn } from '@/lib/utils'
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -16,19 +29,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { ChevronDown, RotateCcw } from 'lucide-react'
-import { memo, useMemo, type ReactNode } from 'react'
-import { useTranslation } from 'react-i18next'
-
-import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from '@/components/ui/collapsible'
-import { getLobeIcon } from '@/lib/lobe-icon'
-import { cn } from '@/lib/utils'
+import { useGroupLabelStore } from '@/stores/group-label-store'
 
 import {
   ENDPOINT_TYPES,
@@ -152,6 +153,7 @@ export const PricingSidebar = memo(function PricingSidebar(
   props: PricingSidebarProps
 ) {
   const { t } = useTranslation()
+  const groupLabels = useGroupLabelStore((s) => s.labels)
   const counts = useMemo(() => {
     const vendors = new Map<string, number>()
     const tags = new Map<string, number>()
@@ -208,7 +210,7 @@ export const PricingSidebar = memo(function PricingSidebar(
     },
     ...props.groups.map((group) => ({
       value: group,
-      label: group,
+      label: groupLabels[group]?.name || group,
       suffix: formatGroupRatio(props.groupRatios?.[group]),
     })),
   ]

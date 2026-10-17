@@ -2,6 +2,7 @@
 package channelcost
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -22,12 +23,21 @@ type Rates struct {
 	CacheWrite   float64 `json:"cache_write"`
 	CacheWrite1h float64 `json:"cache_write_1h"`
 }
+type ChargeUnit struct {
+	Unit  string  `json:"unit"`
+	Units float64 `json:"units"`
+	Price float64 `json:"price"`
+}
+
 type Price struct {
-	RequestPrice  *float64 `json:"request_price,omitempty"`
-	UpstreamModel string   `json:"upstream_model"`
-	OffPeak       Rates    `json:"off_peak"`
-	Peak          *Rates   `json:"peak,omitempty"`
-	Tiers         []Tier   `json:"tiers,omitempty"`
+	RuleSource    string      `json:"rule_source,omitempty"`
+	Dynamic       *Expression `json:"dynamic,omitempty"`
+	ChargeUnit    *ChargeUnit `json:"charge_unit,omitempty"`
+	RequestPrice  *float64    `json:"request_price,omitempty"`
+	UpstreamModel string      `json:"upstream_model"`
+	OffPeak       Rates       `json:"off_peak"`
+	Peak          *Rates      `json:"peak,omitempty"`
+	Tiers         []Tier      `json:"tiers,omitempty"`
 }
 type Snapshot struct {
 	Fingerprint string            `json:"fingerprint"`
@@ -38,21 +48,26 @@ type Snapshot struct {
 	Errors      map[string]string `json:"errors,omitempty"`
 }
 type Receipt struct {
-	UpstreamRequestPrice *float64 `json:"upstream_request_price,omitempty"`
-	CNYRequestPrice      *float64 `json:"cny_request_price,omitempty"`
-	ChannelID            int      `json:"channel_id"`
-	Model                string   `json:"model"`
-	SourceURL            string   `json:"source_url"`
-	SyncedAt             int64    `json:"synced_at"`
-	CreditsPerCNY        float64  `json:"credits_per_cny"`
-	UpstreamGroup        string   `json:"upstream_group"`
-	GroupRatio           float64  `json:"upstream_group_ratio"`
-	CNYPerWalletUnit     float64  `json:"cny_per_wallet_unit"`
-	Tier                 string   `json:"tier"`
-	Upstream             Rates    `json:"upstream"`
-	CNY                  Rates    `json:"cny"`
-	Tiers                []Tier   `json:"tiers,omitempty"`
-	Expression           string   `json:"expression,omitempty"`
+	RuleSource           string                     `json:"rule_source,omitempty"`
+	UsageSchema          map[string]json.RawMessage `json:"usage_schema,omitempty"`
+	Dynamic              bool                       `json:"dynamic,omitempty"`
+	TaskUsageBilling     bool                       `json:"task_usage_billing,omitempty"`
+	ChargeUnit           *ChargeUnit                `json:"charge_unit,omitempty"`
+	UpstreamRequestPrice *float64                   `json:"upstream_request_price,omitempty"`
+	CNYRequestPrice      *float64                   `json:"cny_request_price,omitempty"`
+	ChannelID            int                        `json:"channel_id"`
+	Model                string                     `json:"model"`
+	SourceURL            string                     `json:"source_url"`
+	SyncedAt             int64                      `json:"synced_at"`
+	CreditsPerCNY        float64                    `json:"credits_per_cny"`
+	UpstreamGroup        string                     `json:"upstream_group"`
+	GroupRatio           float64                    `json:"upstream_group_ratio"`
+	CNYPerWalletUnit     float64                    `json:"cny_per_wallet_unit"`
+	Tier                 string                     `json:"tier"`
+	Upstream             Rates                      `json:"upstream"`
+	CNY                  Rates                      `json:"cny"`
+	Tiers                []Tier                     `json:"tiers,omitempty"`
+	Expression           string                     `json:"expression,omitempty"`
 }
 
 func Positive(v float64) bool { return v > 0 && !math.IsNaN(v) && !math.IsInf(v, 0) }
@@ -103,6 +118,24 @@ func (s *Snapshot) Resolve(c *dto.ChannelCostSettings, model string, fingerprint
 		}
 		return nil, "", errors.New("No upstream token price for this channel model")
 	}
+	factor := s.GroupRatio / c.CreditsPerCNY
+	var meter *ChargeUnit
+	if price.ChargeUnit != nil {
+		copy := *price.ChargeUnit
+		copy.Price *= factor
+		meter = &copy
+	}
+	if price.Dynamic != nil {
+		expression, err := price.Dynamic.Scale(factor)
+		if err != nil {
+			return nil, "", err
+		}
+		walletExpression, err := price.Dynamic.Scale(factor / cnyPerUnit)
+		if err != nil {
+			return nil, "", err
+		}
+		return &Receipt{RuleSource: price.RuleSource, Dynamic: true, UsageSchema: price.Dynamic.UsageSchema, TaskUsageBilling: price.Dynamic.Task, ChargeUnit: meter, Model: price.UpstreamModel, SourceURL: s.SourceURL, SyncedAt: s.SyncedAt, CreditsPerCNY: c.CreditsPerCNY, UpstreamGroup: c.UpstreamGroup, GroupRatio: s.GroupRatio, CNYPerWalletUnit: cnyPerUnit, Tier: "expression", Expression: expression}, walletExpression, nil
+	}
 	if price.RequestPrice != nil {
 		amount := *price.RequestPrice * s.GroupRatio / c.CreditsPerCNY
 		expression, err := RequestExpression(amount)
@@ -113,7 +146,7 @@ func (s *Snapshot) Resolve(c *dto.ChannelCostSettings, model string, fingerprint
 		if err != nil {
 			return nil, "", err
 		}
-		return &Receipt{Model: price.UpstreamModel, SourceURL: s.SourceURL, SyncedAt: s.SyncedAt, CreditsPerCNY: c.CreditsPerCNY, UpstreamGroup: c.UpstreamGroup, GroupRatio: s.GroupRatio, CNYPerWalletUnit: cnyPerUnit, Tier: "request", UpstreamRequestPrice: price.RequestPrice, CNYRequestPrice: &amount, Expression: expression}, walletExpression, nil
+		return &Receipt{Model: price.UpstreamModel, SourceURL: s.SourceURL, SyncedAt: s.SyncedAt, CreditsPerCNY: c.CreditsPerCNY, UpstreamGroup: c.UpstreamGroup, GroupRatio: s.GroupRatio, CNYPerWalletUnit: cnyPerUnit, Tier: "request", ChargeUnit: meter, UpstreamRequestPrice: price.RequestPrice, CNYRequestPrice: &amount, Expression: expression}, walletExpression, nil
 	}
 	rates, tier := price.OffPeak, "standard"
 	if price.Peak != nil {
@@ -126,7 +159,6 @@ func (s *Snapshot) Resolve(c *dto.ChannelCostSettings, model string, fingerprint
 			rates, tier = *price.Peak, "peak"
 		}
 	}
-	factor := s.GroupRatio / c.CreditsPerCNY
 	cny := Rates{rates.Input * factor, rates.Output * factor, rates.CacheRead * factor, rates.CacheWrite * factor, rates.CacheWrite1h * factor}
 	if !rates.Valid() || !cny.Valid() {
 		return nil, "", errors.New("Invalid upstream token prices")

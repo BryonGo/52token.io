@@ -1,3 +1,4 @@
+import { api } from '@/lib/api'
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -16,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { api } from '@/lib/api'
+import { useGroupLabelStore } from '@/stores/group-label-store'
 
 import type { PricingData } from './types'
 
@@ -27,5 +28,10 @@ import type { PricingData } from './types'
 // Get model pricing data
 export async function getPricing(): Promise<PricingData> {
   const res = await api.get('/api/pricing')
+  if (res.data.success && res.data.group_labels) {
+    useGroupLabelStore.setState((s) => ({
+      labels: { ...s.labels, ...res.data.group_labels },
+    }))
+  }
   return res.data
 }

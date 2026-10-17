@@ -1055,9 +1055,15 @@ func TestPluginDisplayMetadata(t *testing.T) {
 		name, fields string
 		priority     int
 		website      string
+		providerKind string
 		invalid      bool
 	}{
 		{name: "omitted"},
+		{name: "relay provider", fields: `providerKind: "relay",`, providerKind: "relay"},
+		{name: "official provider", fields: `providerKind: "provider",`, providerKind: "provider"},
+		{name: "invalid provider kind", fields: `providerKind: "proxy",`, invalid: true},
+		{name: "empty provider kind", fields: `providerKind: "",`, invalid: true},
+		{name: "non-string provider kind", fields: `providerKind: 1,`, invalid: true},
 		{name: "zero and empty", fields: `sortPriority: 0, website: "",`},
 		{name: "positive", fields: `sortPriority: 20, website: " https://example.com/docs?q=1#intro ",`, priority: 20, website: "https://example.com/docs?q=1#intro"},
 		{name: "minimum", fields: `sortPriority: -2147483648,`, priority: -2147483648},
@@ -1086,6 +1092,11 @@ func TestPluginDisplayMetadata(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
+			kind := tc.providerKind
+			if kind == "" {
+				kind = "provider"
+			}
+			assert.Equal(t, kind, loaded.Meta.ProviderKind)
 			assert.Equal(t, tc.priority, loaded.Meta.SortPriority)
 			assert.Equal(t, tc.website, loaded.Meta.Website)
 			encoded, err := common.Marshal(loaded.Meta)
@@ -1094,6 +1105,7 @@ func TestPluginDisplayMetadata(t *testing.T) {
 			require.NoError(t, common.Unmarshal(encoded, &decoded))
 			assert.Equal(t, tc.priority, decoded.SortPriority)
 			assert.Equal(t, tc.website, decoded.Website)
+			assert.Equal(t, kind, decoded.ProviderKind)
 		})
 	}
 }

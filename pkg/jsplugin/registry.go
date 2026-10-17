@@ -88,6 +88,7 @@ type Meta struct {
 	SubmitResponseTypes  []string                    `json:"submitResponseTypes,omitempty"`
 	SortPriority         int                         `json:"sortPriority,omitempty"`
 	Website              string                      `json:"website,omitempty"`
+	ProviderKind         string                      `json:"providerKind,omitempty"`
 	APIVersion           int                         `json:"apiVersion"`
 	Key                  string                      `json:"key"`
 	Name                 string                      `json:"name"`
@@ -1030,7 +1031,7 @@ func decodeMeta(value any) (Meta, error) {
 	}
 	for field := range object {
 		switch field {
-		case "requiredCapabilities", "submitResponseTypes", "sortPriority", "website", "apiVersion", "key", "name", "icon", "description", "version", "author", "baseUrl", "channelTypes", "channelType", "compatibleChannelTypes", "models", "fetchMode", "allowedHosts", "upstreams", "routes", "protocols", "usageSchema", "usageExamples", "usageProfiles", "auth", "endpoints", "submitPaths", "actions":
+		case "requiredCapabilities", "submitResponseTypes", "sortPriority", "website", "providerKind", "apiVersion", "key", "name", "icon", "description", "version", "author", "baseUrl", "channelTypes", "channelType", "compatibleChannelTypes", "models", "fetchMode", "allowedHosts", "upstreams", "routes", "protocols", "usageSchema", "usageExamples", "usageProfiles", "auth", "endpoints", "submitPaths", "actions":
 		default:
 			return Meta{}, &UnknownMetaFieldError{Field: field}
 		}
@@ -1055,6 +1056,14 @@ func decodeMeta(value any) (Meta, error) {
 	}
 	if meta.Website, err = stringMetaField(object, "website"); err != nil {
 		return Meta{}, err
+	}
+	if _, exists := object["providerKind"]; exists {
+		if meta.ProviderKind, err = stringMetaField(object, "providerKind"); err != nil {
+			return Meta{}, err
+		}
+		if meta.ProviderKind == "" {
+			return Meta{}, fmt.Errorf("plugin meta providerKind must be provider or relay")
+		}
 	}
 	meta.Icon = strings.TrimSpace(meta.Icon)
 	if meta.Description, err = localizedTextMetaField(object, "description", maxMetaDescriptionRunes); err != nil {
@@ -1208,6 +1217,12 @@ func ValidateV1Meta(meta Meta) error {
 }
 
 func normalizeV1Meta(meta *Meta) error {
+	if meta.ProviderKind == "" {
+		meta.ProviderKind = "provider"
+	}
+	if meta.ProviderKind != "provider" && meta.ProviderKind != "relay" {
+		return fmt.Errorf("plugin meta providerKind must be provider or relay")
+	}
 	seenCapabilities := make(map[string]bool, len(meta.RequiredCapabilities))
 	for _, name := range meta.RequiredCapabilities {
 		if !HasCapability(name) || seenCapabilities[name] {

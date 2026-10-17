@@ -54,16 +54,23 @@ export function ChannelCostFields({
   } catch {
     return null
   }
-  let defaultSource = channelType === 43 ? 'deepseek' : 'happyapi'
+  let defaultSource =
+    matchingSource?.id || (channelType === 43 ? 'deepseek' : 'happyapi')
   if (channelType === 59) defaultSource = matchingSource?.id || ''
   let defaultGroup: string | undefined = 'default'
   if (channelType === 43) defaultGroup = undefined
   if (channelType === 59) defaultGroup = ''
+  let defaultCreditsPerCNY = matchingSource?.default_credits_per_cny
+  if (defaultCreditsPerCNY === undefined) {
+    defaultCreditsPerCNY = 5
+    if (matchingSource?.price_currency) defaultCreditsPerCNY = 0
+    else if (channelType === 43 || channelType === 59) defaultCreditsPerCNY = 1
+  }
   let value: ChannelCostConfig =
     (settings.cost_billing as ChannelCostConfig) ?? {
       enabled: false,
       source: defaultSource,
-      credits_per_cny: channelType === 43 || channelType === 59 ? 1 : 5,
+      credits_per_cny: defaultCreditsPerCNY,
       upstream_group: defaultGroup,
     }
   if (channelType === 59 && !value.source && matchingSource) {
@@ -75,8 +82,15 @@ export function ChannelCostFields({
       JSON.stringify({ ...settings, cost_billing: { ...value, ...patch } }),
       { shouldDirty: true, shouldValidate: true }
     )
+  const selectedSource = sources.data?.sources.find(
+    (item) => item.id === value.source
+  )
+  const initializing = sources.isPending && !settings.cost_billing
   return (
-    <fieldset disabled={disabled} className='space-y-4 rounded-lg border p-4'>
+    <fieldset
+      disabled={disabled || initializing}
+      className='space-y-4 rounded-lg border p-4'
+    >
       <legend className='px-1 text-sm font-medium'>
         {t('Channel CNY cost billing')}
       </legend>
@@ -94,13 +108,16 @@ export function ChannelCostFields({
                   id='channel-cost-enabled'
                   checked={value.enabled}
                   onCheckedChange={(enabled) => update({ enabled })}
-                  disabled={disabled}
+                  disabled={disabled || initializing}
                 />
               </FormControl>
             </div>
             <FormDescription>
               {t(
-                'CNY cost = upstream price × upstream group multiplier ÷ credits received per yuan. Local group multiplier is fixed at 1.'
+                selectedSource?.local_group_billing ||
+                  selectedSource?.reference?.local_group_billing
+                  ? 'Base CNY price = upstream price ÷ credits received per yuan. The local group multiplier is applied once and cannot exceed the upstream multiplier.'
+                  : 'CNY cost = upstream price × upstream group multiplier ÷ credits received per yuan. Local group multiplier is fixed at 1.'
               )}
             </FormDescription>
             <FormMessage />
@@ -125,13 +142,19 @@ export function ChannelCostFields({
                   const selectedSource = sources.data?.sources.find(
                     (item) => item.id === source
                   )
+                  if (selectedSource?.format === 'deepseek_html') {
+                    upstreamGroup = ''
+                  }
                   if (selectedSource?.format === 'sub2api') {
                     upstreamGroup = value.upstream_group || ''
                   }
                   update({
                     source,
                     upstream_group:
-                      source === 'deepseek' ? undefined : upstreamGroup,
+                      selectedSource?.format === 'deepseek_html' ||
+                      source === 'deepseek'
+                        ? undefined
+                        : upstreamGroup,
                   })
                 }
               }}
@@ -171,7 +194,11 @@ export function ChannelCostFields({
               htmlFor='channel-cost-credits'
               className='text-sm font-medium'
             >
-              {t('Upstream credits received per CNY 1')}
+              {t(
+                selectedSource?.price_currency === 'USD'
+                  ? 'Upstream USD received per CNY 1'
+                  : 'Upstream credits received per CNY 1'
+              )}
             </label>
             <Input
               id='channel-cost-credits'
@@ -179,7 +206,7 @@ export function ChannelCostFields({
               min='0.000001'
               max='1000000'
               step='any'
-              value={value.credits_per_cny ?? ''}
+              value={value.credits_per_cny || ''}
               onChange={(event) =>
                 update({ credits_per_cny: Number(event.target.value) })
               }
@@ -188,29 +215,30 @@ export function ChannelCostFields({
               {t('DeepSeek CNY: 1. HappyAPI: CNY 0.2 buys 1 credit, enter 5.')}
             </p>
           </div>
-          {value.source !== 'deepseek' && (
-            <div className='space-y-2 sm:col-span-2'>
-              <label
-                htmlFor='channel-cost-group'
-                className='text-sm font-medium'
-              >
-                {t('Upstream token group')}
-              </label>
-              <Input
-                id='channel-cost-group'
-                value={value.upstream_group ?? ''}
-                onChange={(event) =>
-                  update({ upstream_group: event.target.value.trim() })
-                }
-                placeholder='default / vip'
-              />
-              <p className='text-muted-foreground text-xs'>
-                {t(
-                  'Enter the group assigned to this upstream token. Its public multiplier is synchronized; account-specific discounts and automatic groups are not supported.'
-                )}
-              </p>
-            </div>
-          )}
+          {value.source !== 'deepseek' &&
+            selectedSource?.format !== 'deepseek_html' && (
+              <div className='space-y-2 sm:col-span-2'>
+                <label
+                  htmlFor='channel-cost-group'
+                  className='text-sm font-medium'
+                >
+                  {t('Upstream token group')}
+                </label>
+                <Input
+                  id='channel-cost-group'
+                  value={value.upstream_group ?? ''}
+                  onChange={(event) =>
+                    update({ upstream_group: event.target.value.trim() })
+                  }
+                  placeholder='default / vip'
+                />
+                <p className='text-muted-foreground text-xs'>
+                  {t(
+                    'Enter the group assigned to this upstream token. Its public multiplier is synchronized; account-specific discounts and automatic groups are not supported.'
+                  )}
+                </p>
+              </div>
+            )}
           <p className='text-muted-foreground text-xs sm:col-span-2'>
             {t(
               'Prices sync after saving and every hour. Missing or expired prices block requests. Review channel costs in Model pricing.'

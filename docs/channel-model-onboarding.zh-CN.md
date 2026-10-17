@@ -7,7 +7,10 @@
 ## 1. 分组与渠道
 
 - 一个对外分组只绑定一个真实渠道，禁止同组混入第二个渠道。渠道按上游账户分别建立，不把不同账户的余额、凭据或成本合并。
-- 分组展示名由管理员自行命名，不用展示名推断厂商或实际供应商。内部分组标识应保持稳定；改标识时须同步检查渠道、令牌及业务后端的绑定。
+- 分组展示名由管理员自行命名，不用展示名推断厂商或实际供应商。统一分组管理分别保存固定标识和显示名称；新分组自动生成递增短标识（`g1`、`g2`…），不可手动编辑、删除后不复用。系统默认组使用 `default`。改显示名称不会更改渠道、模型或令牌的绑定、倍率及价格。
+- 开发环境已获准将旧的名称型固定标识一次性迁移为短 ID，POJIA 为 `g2`；相关渠道、Key 及配置绑定同步迁移，Key 值不变。前端按该标识解析最新显示名，提交、筛选和自动分组排序仍使用固定标识。不要把显示名写回渠道或 Key 的绑定字段。
+- 开发环境现有 12 个已定义分组的显示名已于 2026-10-17 统一去掉倍率前缀，采用 `HappyAPI · DeepSeek`、`POJIA · DeepSeek` 等格式，倍率单独显示。仅维护 `GroupProfiles` 名称映射，旧固定 ID、渠道和 Key 绑定、倍率及价格保持不变；不修改历史已删除 Key 的未定义分组，也未应用到生产。
+- 分组管理及高级倍率设置保存后，统一刷新分组名称、Key 可用分组与倍率、自动分组顺序和模型价格缓存。高级可视编辑器中的既有 ID 为只读；新增或修改显示名称应使用统一分组管理。模型、渠道、Key、用户及关联筛选器使用同一份名称映射。
 - 厂商是模型资料属性，例如 DeepSeek、xAI、千问；厂商筛选与分组路由分开维护。
 - 同一型号可在不同渠道、不同分组重复出现。选择某个分组必须路由到该组唯一渠道；明确选择线路的令牌不使用跨分组自动回退。
 
@@ -43,9 +46,71 @@
 
 小数分组方案必须使用该渠道已启用的本地分组计费模式；当前 POJIA 已启用。普通成本渠道可能固定按本地 1 倍结算，不能只修改分组倍率就认为已切换模式，入库时须核对实际实现和扣费结果。
 
-POJIA 当前示例：`R = 1`，上游实际倍率为 `0.08`，本地独立分组 `x0.08 POJIA` 为 `0.08`。Flash 空闲基准输入、输出、缓存分别为 `¥1 / ¥4 / ¥0.02` 每百万 token；实际成本分别为 `¥0.08 / ¥0.32 / ¥0.0016`。分组展示名可由管理员维护，价格折扣不能因此改变。
+POJIA 当前示例：`R = 1`，上游实际倍率为 `0.08`，本地独立分组 `g2`（显示名“POJIA · DeepSeek”）为 `0.08`。Flash 空闲基准输入、输出、缓存分别为 `¥1 / ¥4 / ¥0.02` 每百万 token；实际成本分别为 `¥0.08 / ¥0.32 / ¥0.0016`。分组展示名可由管理员维护，价格折扣不能因此改变。
 
 普通输入、缓存读取、适用的缓存写入和输出分别计费；包含缓存的输入总量不能再重复收一次普通输入费。按次模型保存人民币请求价格表达式，不把它混成 token 单价。峰谷、上下文阶梯等条件必须保留；尚未核实的费率不能擅自推断。
+
+### 美元账户与价格来源维护（开发环境）
+
+DeepSeek 官方美元账户单独绑定 `deepseek-usd` 来源，读取官方英文美元价格表。采购换算采用 `US$1 = ¥6.8`；渠道表单统一填写“每充值 ¥1 到账美元”，值为 `1 / 6.8 = 0.14705882352941177`，保存完整精度。余额按美元展示，钱包、报价及扣费仍按人民币。不能先套中文人民币价，再乘一次 6.8。POJIA 的 `pojia-deepseek` 保留管理员确认的人民币参考价与本地 0.08 分组，不随官方美元账户修改。
+
+开发环境价格来源：
+
+| 固定来源 ID | 名称 | 接口与范围 | 新渠道充值默认值 |
+| --- | --- | --- | --- |
+| `relay88` | 88API · 上游价 | `https://api.88api.ai/api/pricing` | ¥1 → 1 平台额度 |
+| `newtoken` | NewToken · 通用价 | `https://newtoken.club/api/pricing`，排除 `is_video_model = 1` | ¥1 → 1 平台额度 |
+| `newtoken-video` | NewToken · 视频价 | 同一接口，仅保留 `is_video_model = 1`，对应 `/video-models` 页面 | ¥1 → 1 平台额度 |
+| `artapi` | ArtAPI · 上游价 | `https://video.artapi.fun/api/pricing` | ¥1 → 1 平台额度 |
+| `deepseek-usd` | DeepSeek 官方 · 美元价 | 官方英文价格页 | ¥1 → US$0.14705882352941177 |
+
+NewToken 通用与视频页面共用价格接口，用后台可维护的筛选字段、筛选值和排除开关区分；筛选不改模型 ID。来源默认充值值只用于新建渠道，不能批量覆盖旧渠道采购比例。上游分组按实际调用令牌的准确分组选择，不能用后台账户的默认组代替。
+
+需要登录的价格接口可以填写上游后台用户 ID 和访问令牌。令牌单独保存在服务器私密配置项，普通配置、来源查询及公开报价不返回令牌；编辑时留空保留原值。凭据只发送给绑定站点的 HTTPS 价格与状态接口，不跟随重定向；修改接口地址必须重新录入凭据。后台令牌用于读取来源价格，不作为模型调用 key。
+
+开发环境 NewToken 已按一个分组一个渠道建立，充值均为 ¥1 → 1 额度；上游调用 Key 分别固定到对应上游分组，并限制到该渠道的模型清单：
+
+| 固定分组 ID | 渠道 ID | 名称 | 本地／上游倍率 | 模型数 |
+| --- | --- | --- | --- | --- |
+| `g13` | 137 | NewToken · Seedream NSFW | 0.55 | 2 |
+| `g14` | 138 | NewToken · Seedance NSFW | 0.60 | 11 |
+| `g15` | 139 | NewToken · Seedance 全分辨率 NSFW | 0.89 | 4 |
+| `g16` | 140 | NewToken · Claude VIP | 0.30 | 4 |
+| `g17` | 141 | NewToken · GPT / Nana 图片 | 1 | 14 |
+
+NewToken 插件渠道支持独立的账户余额凭据，优先调用该站 `/api/user/self`，结合 `/api/status` 的 `quota_per_unit` 和渠道充值比例展示人民币采购余额。生成 Key 与账户访问令牌分开保存，账户令牌不回显。上述 5 条渠道来自同一个 NewToken 账户，因此余额相同，不能把它们的余额相加；其他上游账户仍各自维护。
+
+余额修复验证（2026-10-17，仅开发环境）：5 条渠道真实调用账户余额接口，均返回 ¥305.779212；该操作不产生生成费用。`go test ./controller -run TestModelManagementDatabaseMatrix/.*/channel_account_balance -count=1 -v` 在真实 SQLite 3.50.4、MySQL 8.4.11、PostgreSQL 18.6 通过；余额与相关计费回归、前端 94 项测试、类型检查及修改文件 lint 通过。未浏览器验收、未上线。
+
+两份 NewToken 来源启用顶层 `local_group_billing`：保留人民币基准价，执行时只应用一次本地分组倍率。采购成本凭据仍记录上游实际倍率；本地倍率高于采购倍率时拒绝扣费。原有 POJIA 的参考来源配置继续兼容，其他来源不改变模式。
+
+来源后台可维护 `model_rules`，为价格接口未提供的条件附加文档规则。按精确模型 ID 匹配，记录 `document_url`；`{{request_price}}`、`{{input_per_million}}`、`{{output_per_million}}` 绑定该模型本次同步到的基准价，不能引用其他模型。表达式和计量 schema 必须通过校验。当前补充 Seedream 的额外参考图收费（首张免费，其后每张基准 ¥0.021），以及原生 Seedance 的参考视频 Token 费率，规则来源为 NewToken 相应接口文档。
+
+NewToken 插件 1.2.0 同时处理 7 个异步 GPT/Nana 图片、7 个同步 GPT/Nana 图片、2 个同步 Seedream 和视频任务；同步结果支持上游原生 URL／Base64，原生图片完整结果不持久化。异步图片按文档向 `/v1/videos` 发送 `seconds: "4"`，这表示价格份数约定，不是视频时长或额外倍率。
+
+`g15` 保留管理员确认的全分辨率分组名称，但 [NewToken 原生文档](https://doc.newtoken.club/api-docs/seedance-official.html) 明确当前这些原生型号只支持 720p，因此不会宣称或放开未经确认的 1080p／4K；兼容接口的 `sd2.0-1080p-official` 则保留在上游允许的 `g14` 中，通过独立精确模型 ID 计费。分组名称不能覆盖模型能力。
+
+来源可以开启“保留条件公式及按量计费规则”（`advanced_pricing`）。开发环境仅为 `relay88`、`newtoken`、`newtoken-video` 开启；已有其它来源保持原配置。新建来源默认开启，历史来源编辑时保留原状态。
+
+- 同步读取 `request_price_display_unit`、`request_price_units` 及 `billing_usage_schema`。NewToken 的特殊份数是每请求的计价份数，实际请求标价为单价乘份数；例如 `0.025 × 4 = 0.10`，不是除以 4，也不再额外乘生成数量。
+- `second` 保存为 `tier("second", u("seconds") * 单价)`，按任务的秒数计费。NewToken 原生视频的同价输入/输出 token 费率保存为 `u("tokens") * 每百万单价 / 1000000`，任务金额不再被宿主额外除一次百万。
+- 88API 的条件、时间、上下文、缓存、图像数量、音频及任务用量公式完整保留。人民币换算只改变价格项，不改变上下文阈值、秒数、数量、日期、缓存条件及单位分母。原始公式的每个分支都必须通过语法和非负价格检查；不会借用其它模型价格，也不回退到旧倍率字段。
+- 本地任务先按请求数量预扣，再用同一份冻结公式按上游完成用量补退。失败任务全额退款。采购成本使用向下取整，不通过四舍五入多收一个配额点；普通非采购定价沿用原来的规则。
+- 执行渠道的任务插件必须提供公式声明的用量字段，字段的单位和枚举值也必须兼容。价格定义可同步不等于所有模型协议都已接通；未知计量不会被猜成按次价格，不兼容的调用在发往上游前拒绝。
+- NewToken 插件 1.1.0 起增加 `/v1/videos` 上游的按秒视频与异步图片任务，原有 Ark 原生 Seedance、Seedream 路径保留；国内火山插件不改。接口地址末尾带 `/v1/` 时只拼接一次。按秒模型请求时长为 4–15 秒整数，2.5 系列支持 4–30 秒；接受数字及 `"8s"` 格式，完成结果用上游返回秒数结算。
+
+[NewToken 官方兼容接口文档](https://doc.newtoken.club/api-docs/seedance-openai-compatible.html) 说明：部分 `*-official` 模型携带 `extra_videos` 后按最终 tokens 结算，不能沿用普通请求的每秒价格。当前价格接口未提供该条件费率；开发环境在调用上游前拒绝这类缺价请求，不扣钱包或 Key。原生 Ark 的四个型号现已根据官方协议文档补充对应参考视频条件费率；`/v1/videos` 混合结算模式仍明确拒绝缺少完整结算规则的请求。普通按秒请求正常计费。
+
+使用实际接口价格做的计算核对：NewToken `nana-banana-pro` 在 1 倍组、充值 1:1 时为 ¥0.10/请求；`video-ultra-720p` 标价 1、上游倍率 0.5 时为 ¥0.50/秒，5 秒 ¥2.50；原生 Seedance 的上游 46/百万 tokens、倍率 0.5 时为 ¥23/百万 tokens，1000 tokens 为 ¥0.023。88API Seedream 2K 标价 0.60、1 倍组、2 张图为 ¥1.20。这些数字是当次读取的价格规则计算结果，未声称本轮已产生付费生成账单。特殊份数的解释同时核对了 [NewToken 价格页](https://newtoken.club/pricing) 展示代码中的每请求计算。
+
+本轮真实价格接口解析结果：88API 100/100、NewToken 通用 25/25、视频 13/13，接口实际返回的条目均解析成功；这不包含接口未公开的参考视频条件价。使用本地上游响应替身完成了公开人民币报价、预扣、任务完成补退、失败退款及钱包/Key 余额的一致性检查，并在 SQLite 3.50.4、MySQL 8.4.11、PostgreSQL 18.6 的隔离测试库验证。未发起新的上游付费生成请求；未浏览器验收，未上线。
+
+本次复杂计费回归：`go test ./pkg/billingexpr ./pkg/channelcost ./service ./relay/helper ./relay ./model ./plugins -count=1`；Controller 覆盖 `TestNewTokenProcurementTaskBilling`、`TestBytePlusNativeImageDelivery`、`TestKlingNativeRoute`。前端 49 项相关测试、类型检查、构建及本次修改文件的 lint 通过。全仓 lint 仍被既有问题阻塞（例如 `src/lib/utils.ts`、`tasks/xai/plugin.js`），本轮未改动这些文件。
+
+本次验证（2026-10-17，仅开发环境）：后台使用 `go test ./service ./model ./controller ./router -run 'TestProtectedPriceSource|TestDeepSeekCostOfficialDocumentAndCalendar|TestPriceSourceRejectsUnsupportedOrInvalidPrices|TestMappedPriceSource|TestFixedUpstream|TestManagedGroupsAndKeyProjectsMatrix|TestPublicCatalog|TestAccessTokenRouteRulesCoverEveryDashboardRoute' -count=1`，并单独覆盖来源筛选、按秒/特殊份数拒绝、凭据重定向及跨站点拒绝；前端运行相关 Vitest、`bun run typecheck` 与 `bun run build`。真实数据库矩阵命令为 `go test ./controller -run TestManagedGroupsAndKeyProjectsMatrix -count=1 -v`，使用 SQLite 3.50.4、MySQL 8.4.11、PostgreSQL 18.6 的隔离测试库，覆盖凭据单独保存、不回显、令牌轮换版本检查及筛选字段持久化。没有修改数据库结构。
+
+凭据相关检查参考 [OWASP Authentication Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html)、[Session Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html) 和 [Authorization Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html)，本次针对 HTTPS、来源绑定、禁止重定向、敏感写权限和凭据不进入普通响应做了回归；这不代表对整个平台进行了全面安全认证。命令行公开接口核对了 9 个分组、144 个模型及 DeepSeek / POJIA 人民币报价。本轮没有付费生成请求，没有浏览器验收，没有生产发布。
+
 
 ## 4. 入库顺序
 
@@ -65,3 +130,75 @@ POJIA 当前示例：`R = 1`，上游实际倍率为 `0.08`，本地独立分组
 - 流式响应有完整内容并正常结束；扣费按上游实际结算口径核对，不能因为返回字段异常而多收估算费用。
 - 当前钱包精度为每配额点 `¥0.000002`。人民币成本结算向下取整，差额由平台承担，不向上加收；若钱包单位设置改变，应重新验证。
 - 本规范是维护要求。未实施自动约束、未核实的峰谷价格和未完成实账验收的模型，必须如实记录状态。
+
+## 6. Key 项目归属与 Dashboard 消耗
+
+- 项目只组织 Key 和统计，不参与路由、分组倍率、价格或钱包结算。新旧 Key 都可编辑所属项目；未指定项目的旧客户端更新不会清空既有归属。
+- Key 管理保留项目列表、筛选、项目维护和“所属项目”列；不在该页面展示项目消耗统计。
+- Dashboard 的项目消耗可选全部项目、未分配或当前账户自己的项目。累计消耗汇总当前归属 Key 的累计扣费，包含仍保留记录的已删除 Key。
+- 今天、近 7 天、近 30 天均按北京时间的自然日计算，包含今天；每日、模型大类、精确模型明细来自所选时间范围内保留的消费日志。没有日志的日期补零，请求失败日志不计入消费。
+- 模型大类仅用于报表归类：例如 DeepSeek、GPT、Claude、Seedream、Seedance。未知系列优先使用现有模型资料中的厂商，否则标为未分类；不改精确模型 ID，也不参与价格匹配。
+- Key 改项目后，历史消耗也随当前归属迁移。累计值可因日志清理而高于明细加总；这些数值是本平台实际扣费，不能替代上游消费账单。
+- 项目及统计查询均按当前账户限制；不能通过传入别人的项目 ID 查看数据。统计不返回上游密钥或渠道身份。
+
+开发验证（2026-10-17）：`go test ./controller -run TestManagedGroupsAndKeyProjectsMatrix -count=1 -v`，使用真实 SQLite 3.50.4、MySQL 8.4.11、PostgreSQL 18.6，通过新建与升级、重复迁移、独立日志库、项目隔离、跨日边界及合计校验。认证与授权验证参考 OWASP ASVS 5.0.0、Authentication / Session Management / Authorization Cheat Sheets；本验证不代表全站合规认证。
+
+## 7. 产品使用的公开模型目录与价格查询
+
+产品组请求、返回示例及固定 ID 对照见 [产品组接入说明](product-model-pricing-api.zh-CN.md)。
+
+目录和价格是公开只读数据，不要求 Key 或后台登录，也不按调用 Key 过滤。模型调用和账户管理沿用各自的认证。三条公开接口复用现有按 IP 的全局 API 限流；额外的访问 IP 白名单由部署入口维护，本次没有修改生产网络配置。
+
+```text
+GET /v1/model-groups
+GET /v1/model-catalog?group_id={固定分组ID}
+GET /v1/model-prices/{pricing_id}
+```
+
+本地可使用 `http://localhost:5173` 或后端 `http://localhost:3000`。
+
+`/v1/model-groups` 按固定分组 ID 返回去重后的 `group_id`、`group_name`、`group_multiplier`、`model_count`；只发布存在启用模型的已注册分组，不返回空分组。`model_count` 按该组公开目录中的线路记录计数。同名、同倍率分组仍独立返回。
+
+模型目录的非空 `group_id` 参数按固定 ID 精确匹配，需要 URL 编码；不匹配显示名、前缀或大小写变体。未知或无启用模型的分组返回 HTTP 200 空列表，不回退到全部目录。省略或留空 `group_id` 时保持原有完整目录行为。分组列表和模型目录均可缓存 15 秒，筛选目录的客户端缓存键必须包含 `group_id`。
+
+目录按当前启用渠道中的已配置模型生成，不把上游 `/v1/models` 返回的所有型号自动发布。仅包含已注册分组，忽略空模型并去重同一条线路的重复模型配置。列表形状为 `{"object":"list","data":[...]}`，每条记录包含：
+
+| 字段 | 含义 |
+| --- | --- |
+| `id` | 用于调用的精确模型名，保留大小写、版本、路径和后缀 |
+| `model_uid` | 精确模型名的稳定标识；不同渠道同名模型可共享此标识，但不共享价格 |
+| `group_id` / `group_name` | 固定分组标识与可修改的显示名 |
+| `channel_id` / `channel_name` | 对应渠道标识与显示名 |
+| `group_multiplier` | 分组配置倍率；不是让前端再次乘到返回价格上的系数 |
+| `pricing_id` / `pricing_url` | 固定分组＋渠道 ID＋精确模型名组合的稳定查价标识与地址 |
+| `model_family` | 模型大类，用于产品侧筛选 |
+| `supported_endpoint_types` | 这条线路声明支持的接口类型 |
+
+同名、同倍率分组可以并存，例如 `HappyAPI · DeepSeek · 账户 A` 与 `HappyAPI · DeepSeek · 账户 B`；即使显示名完全相同也不覆盖，因为固定 ID 不同。改显示名、倍率、价格或排序均不改变 `pricing_id`；改变渠道、固定分组或精确模型名会形成新的记录。除本次已获准的开发环境短 ID 迁移外，不自动更换固定标识。本次迁移后的产品接入须重新拉分组和报价 ID；不得沿用旧缓存。
+
+价格响应形状为 `{"object":"model_price","data":{...}}`：
+
+- `currency` 固定为 `CNY`。`rates` 为每百万 token 的人民币价格，包含输入、输出、缓存读取、缓存写入与一小时缓存写入；`request_price` 为人民币每请求价格。
+- 成本同步线路同时返回当前 `cost_rates` 或 `cost_request_price`，表示采购成本；`rates` / `request_price` 表示平台按该分组收取的价格。正常 1:1 配置下两者相同；管理员将本地倍率设得更低时，两者的差额由平台承担，不把补贴后的低价冒充采购成本。本地手动配置来源不返回未经核实的采购成本。
+- `expression` 的系数使用人民币口径。按次返回 `tier("request", fixed(...))`；上下文阶梯返回 `tiers` 及表达式。普通 token 数按百万计价；缓存类别沿用现有计费表达式的排除规则，不重复计费。
+- `applied_group_multiplier` 说明实际计入的本地分组倍率。普通成本渠道的上游倍率已经含在人民币成本里；POJIA 模式恢复基准价后只乘一次本地倍率。前端直接展示返回价，不再自行乘倍率或汇率。
+- 峰谷模型返回当前 `rates`、`current_tier`、`peak_rates`、`off_peak_rates`、`schedule=deepseek_2026` 和 `timezone=Asia/Shanghai`，遵循现有已核实的 DeepSeek 日历。
+- `quoted_at` 为查询时间，`synced_at` 为上游同步时间，`valid_until` 不超过快照到期时间或下一次峰谷切换。`price_version` 用于识别价格响应的变化。目录允许缓存 15 秒；查价响应为 `no-store`，产品可按有效期刷新。
+- `price_source=upstream` 表示渠道价格同步，`reference` 表示约定参考价，`configured` 表示本地手动或传统计费规则。`configured` 不能自动认作已核验的真实采购成本；尚不能精确表达的旧多模态价格返回不可用，不编造数值。
+- 未同步、快照过期、钱包换算不一致或分组倍率不符合成本规则时，返回 `available=false` 与机器可读原因，不用零价代替。未知 ID、已移除模型或停用渠道返回 404。公开数据不包含调用 Key、账户凭据、上游后台分组及接口凭据配置。
+
+`pricing_id` 用于查询价格；真实调用仍提交目录中的 `id`，并使用对应线路的 Key。公开价是该分组默认规则，不按个人账户的特殊倍率改写；实际费用由用量、缓存、时间及具体请求条件决定。
+
+验证命令：`go test ./model ./controller ./router -run 'TestPublicCatalog|TestManagedGroupsAndKeyProjectsMatrix|TestAccessTokenRouteRulesCoverEveryDashboardRoute' -count=1`；数据库矩阵覆盖上述三种真实数据库。公开接口测试不携带任何登录或调用凭证。
+
+
+## 7. 模型健康检查与费用边界
+
+- 配置沿用 `/system-settings/request-policies/health`。Chat 按渠道与模型至少间隔 30 分钟检测；每轮每个渠道最多 20 个模型，优先覆盖最久未检测的模型，避免大渠道长期漏检。
+- 定时任务、单模型测试和“测试所有渠道”共用安全检测入口。图片、视频、音频和无法确认类型的别名只 GET 固定的免费模型目录，不请求生成，不用 POST 或生成接口作为兜底。上游缺少免费检测接口时标为未验证。
+- Dashboard 展示全部已配置及已下架模型，按渠道区分同名模型，显示检测累计连通率、响应毫秒数、最近检测与健康状态。媒体“接口可达”不等于生成已验证；没有样本时不显示虚假的 0% 或健康状态。
+- 连续失败 3 次只下架本渠道对应模型，保留渠道和其他模型；恢复后重新上架。同步更新路由、公开模型目录和 Key 所见的 `/v1/models`；Key 原有授权不能让已下架模型重新出现。实际请求的渠道保护规则仍单独维护。
+- 路由变化和模型能力表在事务中保存。只有原本匹配的成本快照才同步更新路由指纹，保持价格、价格来源及原同步时间不变；已经失效的快照不能借健康检测重新生效。
+- 删除健康设置页中已无执行逻辑的旧“超时停用渠道”输入，避免误以为该数值会自动判定整个渠道。
+
+开发验证（2026-10-17）：`go test ./controller -run 'TestModelManagementDatabaseMatrix/.*/model_health' -count=1 -v` 在真实 SQLite 3.50.4、MySQL 8.4.11、PostgreSQL 18.6 隔离库通过，覆盖免费 GET、手动指定媒体模型不生成、连续失败下架、Key 模型目录过滤、同名渠道隔离和采购价格保持有效。NewToken 的 4 条媒体渠道共 31 条模型记录实际通过免费模型接口检查，未新增生成费用。没有浏览器验收，没有生产发布。

@@ -1,6 +1,7 @@
 package helper
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -10,6 +11,8 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/billingexpr"
+	"github.com/QuantumNous/new-api/pkg/channelcost"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -37,7 +40,7 @@ func channelCostPrice(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 		return hosttypes.PriceData{}, true, errors.New("Channel cost billing does not support parameter overrides")
 	}
 	switch info.RelayFormat {
-	case types.RelayFormatOpenAI, types.RelayFormatClaude, types.RelayFormatOpenAIResponses, types.RelayFormatEmbedding:
+	case types.RelayFormatOpenAI, types.RelayFormatClaude, types.RelayFormatOpenAIResponses, types.RelayFormatEmbedding, types.RelayFormatOpenAIImage:
 	default:
 		return hosttypes.PriceData{}, true, errors.New("Channel cost billing does not support this request format")
 	}
@@ -69,6 +72,9 @@ func channelCostPrice(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 	if err != nil {
 		return hosttypes.PriceData{}, true, err
 	}
+	if receipt.TaskUsageBilling {
+		return hosttypes.PriceData{}, true, errors.New("Channel cost expression requires a compatible task usage meter")
+	}
 	receipt.ChannelID = id
 	info.BillingModelName = info.OriginModelName
 	group := hosttypes.GroupRatioInfo{GroupRatio: 1, GroupSpecialRatio: -1}
@@ -76,7 +82,7 @@ func channelCostPrice(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 	if err != nil {
 		return hosttypes.PriceData{}, true, err
 	}
-	if ref := source.Reference; ref != nil && ref.LocalGroupBilling {
+	if source.UsesLocalGroupBilling() {
 		group = HandleGroupRatio(c, info)
 		if group.GroupRatio < 0 || math.IsNaN(group.GroupRatio) || math.IsInf(group.GroupRatio, 0) || group.GroupRatio > receipt.GroupRatio+1e-12 {
 			return hosttypes.PriceData{}, true, errors.New("Local group multiplier exceeds the upstream cost multiplier")
@@ -90,6 +96,9 @@ func channelCostPrice(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 		return hosttypes.PriceData{}, true, err
 	}
 	data.ChannelCost = receipt
+	if info.TieredBillingSnapshot != nil {
+		info.TieredBillingSnapshot.ProcurementCost = true
+	}
 	info.PriceData = data
 	return data, true, nil
 }
@@ -109,4 +118,53 @@ func RefreshChannelCostPricing(c *gin.Context, info *relaycommon.RelayInfo) (boo
 	info.TieredBillingSnapshot = nil
 	_, err := ModelPriceHelper(c, info, info.GetEstimatePromptTokens(), info.Request.GetTokenCountMeta())
 	return true, err
+}
+
+// ChannelCostTaskExpression pins the procurement contract to the selected
+// channel before a task is submitted. A group discount is applied only once.
+func ChannelCostTaskExpression(c *gin.Context, info *relaycommon.RelayInfo) (*channelcost.Receipt, string, hosttypes.GroupRatioInfo, error) {
+	group := hosttypes.GroupRatioInfo{GroupRatio: 1, GroupSpecialRatio: -1}
+	if info.ChannelMeta == nil || info.ChannelOtherSettings.CostBilling == nil || !info.ChannelOtherSettings.CostBilling.Enabled {
+		return nil, "", group, nil
+	}
+	ch, err := model.CacheGetChannel(info.ChannelId)
+	if err != nil {
+		return nil, "", group, err
+	}
+	cfg := ch.GetOtherSettings().CostBilling
+	if cfg == nil || !cfg.Enabled {
+		return nil, "", group, nil
+	}
+	if !channelcost.Positive(operation_setting.Price) || math.Abs(operation_setting.Price-operation_setting.USDExchangeRate) > 1e-9 {
+		return nil, "", group, errors.New("CNY cost billing requires matching wallet recharge and display conversion rates")
+	}
+	if ch.ParamOverride != nil && strings.TrimSpace(*ch.ParamOverride) != "" && strings.TrimSpace(*ch.ParamOverride) != "{}" {
+		return nil, "", group, errors.New("Channel cost billing does not support parameter overrides")
+	}
+	receipt, expression, err := model.GetChannelCostSnapshot(ch.Id).Resolve(cfg, info.OriginModelName, model.ChannelCostFingerprint(ch), time.Now(), operation_setting.USDExchangeRate)
+	if err != nil {
+		return nil, "", group, err
+	}
+	if !receipt.TaskUsageBilling {
+		expression, err = channelcost.TaskExpression(expression)
+		if err != nil {
+			return nil, "", group, err
+		}
+		if billingexpr.UsedUsageKeys(expression)["image_count"] {
+			receipt.UsageSchema = map[string]json.RawMessage{"image_count": json.RawMessage(`{"type":"number","unit":"count"}`)}
+		}
+	}
+	source, err := model.GetChannelPriceSource(cfg.Source)
+	if err != nil {
+		return nil, "", group, err
+	}
+	if source.UsesLocalGroupBilling() {
+		group = HandleGroupRatio(c, info)
+		if group.GroupRatio < 0 || math.IsNaN(group.GroupRatio) || math.IsInf(group.GroupRatio, 0) || group.GroupRatio > receipt.GroupRatio+1e-12 {
+			return nil, "", group, errors.New("Local group multiplier exceeds the upstream cost multiplier")
+		}
+		expression = "(" + expression + ") / " + fmt.Sprintf("%.17g", receipt.GroupRatio)
+	}
+	receipt.ChannelID = ch.Id
+	return receipt, expression, group, nil
 }

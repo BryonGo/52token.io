@@ -24,6 +24,34 @@ import type {
   UptimeGroupResult,
 } from './types'
 
+export type ModelHealthRow = {
+  channel_id: number
+  channel_name: string
+  model: string
+  groups: Array<{ id: string; name: string }>
+  state:
+    | 'unknown'
+    | 'unverified'
+    | 'healthy'
+    | 'unhealthy'
+    | 'interface_only'
+    | 'stale'
+    | 'disabled'
+  routed: boolean
+  checked_at: number
+  latency_ms: number
+  success_rate: number | null
+  checks: number
+  method: string
+}
+
+export async function getModelHealth() {
+  const response = await api.get<{ success: boolean; data: ModelHealthRow[] }>(
+    '/api/channel/model-health'
+  )
+  return response.data
+}
+
 // ============================================================================
 // Dashboard APIs
 // ============================================================================
@@ -90,4 +118,27 @@ export async function getUptimeStatus() {
     '/api/uptime/status'
   )
   return res.data
+}
+
+export type ProjectUsageAmount = {
+  name: string
+  quota: number
+  requests: number
+}
+export type ProjectUsageReport = {
+  total_quota: number
+  period_quota: number
+  requests: number
+  timezone: string
+  daily: ProjectUsageAmount[]
+  families: ProjectUsageAmount[]
+  models: ProjectUsageAmount[]
+}
+export async function getProjectUsage(
+  projectId: number | undefined,
+  days: number
+): Promise<{ success: boolean; message?: string; data?: ProjectUsageReport }> {
+  const params = new URLSearchParams({ days: String(days) })
+  if (projectId !== undefined) params.set('project_id', String(projectId))
+  return (await api.get(`/api/token/project-usage?${params}`)).data
 }

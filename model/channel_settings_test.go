@@ -393,7 +393,7 @@ func TestChannelCostCatalogKeepsSameNamePricesSeparate(t *testing.T) {
 	assert.InDelta(t, 0.24, result[1].ChannelCost.CNY.Input, 1e-9)
 	assert.InDelta(t, 1.0, result[1].ChannelCost.CNY.Output, 1e-9)
 	assert.NotEqual(t, result[0].ChannelID, result[1].ChannelID)
-	assert.Equal(t, []constant.EndpointType{constant.EndpointTypeOpenAI}, result[0].SupportedEndpointTypes)
+	assert.Equal(t, []constant.EndpointType{constant.EndpointTypeOpenAI, constant.EndpointTypeImageGeneration}, result[0].SupportedEndpointTypes)
 	assert.Len(t, base[0].SupportedEndpointTypes, 2)
 	assert.Equal(t, 0.5, base[0].ModelRatio, "catalog cache must not be modified")
 	expired := channelCostCatalog(base, channels, now.Add(25*time.Hour))

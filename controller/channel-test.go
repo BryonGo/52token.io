@@ -2,6 +2,7 @@ package controller
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -29,6 +30,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	hosttypes "github.com/QuantumNous/new-api/types"
 
@@ -169,7 +171,19 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	c.Set("channel", channel.Type)
 	c.Set("base_url", channel.GetBaseURL())
 	group, _ := model.GetUserGroup(testUserID, false)
-	c.Set("group", group)
+	// A pinned channel probe uses one of that channel's routing groups, rather
+	// than pricing it through an unrelated administrator account group.
+	groups := channel.GetGroups()
+	if !slices.Contains(groups, group) {
+		for _, candidate := range groups {
+			if candidate != "" {
+				group = candidate
+				break
+			}
+		}
+	}
+	common.SetContextKey(c, constant.ContextKeyUsingGroup, group)
+	common.SetContextKey(c, constant.ContextKeyTokenGroup, group)
 
 	newAPIError := middleware.SetupContextForSelectedChannel(c, channel, testModel)
 	if newAPIError != nil {
@@ -230,6 +244,16 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 		}
 	}
 
+	// Probe the configured upstream protocol when production chat requests are
+	// upgraded to Responses. Raw passthrough deliberately bypasses that policy.
+	if relayFormat == types.RelayFormatOpenAI &&
+		!model_setting.GetGlobalSettings().PassThroughRequestEnabled &&
+		!channel.GetSetting().PassThroughBodyEnabled &&
+		service.ShouldChatCompletionsUseResponsesGlobal(channel.Id, channel.Type, testModel) {
+		endpointType = string(constant.EndpointTypeOpenAIResponse)
+		relayFormat = types.RelayFormatOpenAIResponses
+		c.Request.URL.Path = "/v1/responses"
+	}
 	request := buildTestRequest(testModel, endpointType, channel, isStream)
 
 	info, err := relaycommon.GenRelayInfo(c, relayFormat, request, nil)
@@ -732,9 +756,10 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 		case constant.EndpointTypeOpenAIResponse:
 			// 返回 OpenAIResponsesRequest
 			return &dto.OpenAIResponsesRequest{
-				Model:  model,
-				Input:  json.RawMessage(`[{"role":"user","content":"hi"}]`),
-				Stream: lo.ToPtr(isStream),
+				Model:           model,
+				Input:           json.RawMessage(`[{"role":"user","content":"hi"}]`),
+				Stream:          lo.ToPtr(isStream),
+				MaxOutputTokens: lo.ToPtr(uint(16)),
 			}
 		case constant.EndpointTypeOpenAIResponseCompact:
 			// 返回 OpenAIResponsesCompactionRequest
@@ -809,9 +834,10 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 	// Responses-only models (e.g. codex series)
 	if strings.Contains(strings.ToLower(model), "codex") {
 		return &dto.OpenAIResponsesRequest{
-			Model:  model,
-			Input:  json.RawMessage(`[{"role":"user","content":"hi"}]`),
-			Stream: lo.ToPtr(isStream),
+			Model:           model,
+			Input:           json.RawMessage(`[{"role":"user","content":"hi"}]`),
+			Stream:          lo.ToPtr(isStream),
+			MaxOutputTokens: lo.ToPtr(uint(16)),
 		}
 	}
 
@@ -846,208 +872,129 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 }
 
 func TestChannel(c *gin.Context) {
-	channelId, err := strconv.Atoi(c.Param("id"))
+	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	channel, err := model.CacheGetChannel(channelId)
+	channel, err := model.GetChannelById(id, true)
 	if err != nil {
-		channel, err = model.GetChannelById(channelId, true)
-		if err != nil {
-			common.ApiError(c, err)
-			return
+		common.ApiError(c, err)
+		return
+	}
+	if _, running := modelHealthRunning.LoadOrStore(channel.Id, true); running {
+		common.ApiErrorT(c, "A model health check is already running for this channel")
+		return
+	}
+	defer modelHealthRunning.Delete(channel.Id)
+	userID, err := resolveChannelTestUserID(c)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	name := strings.TrimSpace(c.Query("model"))
+	if name == "" && channel.TestModel != nil {
+		name = strings.TrimSpace(*channel.TestModel)
+	}
+	if name == "" {
+		names := channel.GetModels()
+		if len(names) > 0 {
+			name = names[0]
 		}
 	}
-	//defer func() {
-	//	if channel.ChannelInfo.IsMultiKey {
-	//		go func() { _ = channel.SaveChannelInfo() }()
-	//	}
-	//}()
-	testModel := c.Query("model")
-	endpointType := c.Query("endpoint_type")
-	isStream, _ := strconv.ParseBool(c.Query("stream"))
-	testUserID, err := resolveChannelTestUserID(c)
-	if err != nil {
-		common.ApiError(c, err)
+	if name == "" {
+		common.ApiErrorT(c, "No models configured for this channel")
 		return
 	}
-	tik := time.Now()
-	requestCtx := context.Background()
+	ctx := context.Background()
 	if c.Request != nil {
-		requestCtx = c.Request.Context()
+		ctx = c.Request.Context()
 	}
-	pinnedModel := strings.TrimSpace(testModel) != ""
-	if !pinnedModel {
-		target, ok := channelHealthCheckTarget(channel)
-		if !ok {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": "This channel only serves generation models; no probe was sent to avoid a charged output",
-				"time":    0.0,
-			})
-			return
+	health := readModelHealth(channel)
+	sample := health[name]
+	cached := sample.CheckedAt > 0 && time.Now().Unix()-sample.CheckedAt < int64(modelHealthInterval/time.Second)
+	var probeErr *types.NewAPIError
+	if !cached {
+		stream, _ := strconv.ParseBool(c.Query("stream"))
+		probeErr = newSafeModelHealthProbe(channel, userID, health, c.Query("endpoint_type"), stream)(ctx, name)
+		if ctx.Err() == nil {
+			persistModelSweep(channel, modelProbeSweep{Alive: channel.GetModels(), Disabled: readChannelDisabledModels(channel), Failures: readChannelModelFailures(channel), Health: health, Complete: true})
 		}
-		testModel = target
+		sample = health[name]
 	}
-	result := testChannel(requestCtx, channel, testUserID, testModel, endpointType, isStream)
-	if result.localErr != nil {
-		resp := gin.H{
-			"success": false,
-			"message": result.localErr.Error(),
-			"time":    0.0,
-		}
-		if result.newAPIError != nil {
-			resp["error_code"] = result.newAPIError.GetErrorCode()
-		}
-		c.JSON(http.StatusOK, resp)
-		return
+	message := ""
+	if sample.Method != "chat" {
+		message = "Only the free model directory was checked; generation was not requested"
 	}
-	tok := time.Now()
-	milliseconds := tok.Sub(tik).Milliseconds()
-	go channel.UpdateResponseTime(milliseconds)
-	consumedTime := float64(milliseconds) / 1000.0
-
-	// The connection test reuses the model level probe of the automatic health
-	// check: unless the caller pinned one model, refresh which models answer
-	// instead of judging the whole channel by this single probe.
-	modelSummary := gin.H{}
-	if !pinnedModel && strings.TrimSpace(endpointType) == "" &&
-		channel.Status == common.ChannelStatusEnabled {
-		sweepCtx, cancelSweep := context.WithTimeout(requestCtx, manualModelProbeBudget)
-		usable, parked := refreshChannelModels(sweepCtx, channel, testUserID, maxModelProbesPerManualTest)
-		cancelSweep()
-		modelSummary = gin.H{"models": gin.H{"usable": usable, "disabled": parked}}
+	if probeErr == modelProbeUnverified || sample.Method == "unverified" {
+		message = "The upstream does not provide a free model directory check; no generation request was sent"
 	}
-
-	if result.newAPIError != nil {
-		resp := gin.H{
-			"success":    false,
-			"message":    result.newAPIError.Error(),
-			"time":       consumedTime,
-			"error_code": result.newAPIError.GetErrorCode(),
-		}
-		for key, value := range modelSummary {
-			resp[key] = value
-		}
-		c.JSON(http.StatusOK, resp)
-		return
+	if probeErr != nil && probeErr != modelProbeUnverified {
+		message = sanitizeFetchModelsError(probeErr, channel.Key).Error()
 	}
-	resp := gin.H{
-		"success": true,
-		"message": "",
-		"time":    consumedTime,
-	}
-	for key, value := range modelSummary {
-		resp[key] = value
-	}
-	c.JSON(http.StatusOK, resp)
+	c.JSON(http.StatusOK, gin.H{"success": sample.Success && probeErr == nil, "message": message, "time": float64(sample.LatencyMS) / 1000, "cached": cached, "probe_kind": sample.Method})
 }
 
 // channelTestSummary records the outcome of one channel test cycle so the
 // system task can persist a per-run result for history.
 type channelTestSummary struct {
-	Tested         int `json:"tested"`
-	Succeeded      int `json:"succeeded"`
-	Failed         int `json:"failed"`
-	Disabled       int `json:"disabled"`
-	Enabled        int `json:"enabled"`
-	ModelsDisabled int `json:"models_disabled"`
+	Tested          int `json:"tested"`
+	Succeeded       int `json:"succeeded"`
+	Failed          int `json:"failed"`
+	Disabled        int `json:"disabled"`
+	Enabled         int `json:"enabled"`
+	ModelsDisabled  int `json:"models_disabled"`
+	ModelsTested    int `json:"models_tested,omitempty"`
+	ModelsSucceeded int `json:"models_succeeded,omitempty"`
+	ModelsFailed    int `json:"models_failed,omitempty"`
 }
 
-// channelHealthCheckTarget reports which model the channel level health check
-// probes, and whether probing is allowed at all. Billable generation models are
-// never probed because a probe would produce a charged output, so a channel that
-// only serves them is left to the model sweep, which skips them as well. A test
-// model pinned on the channel counts as an explicit choice and is skipped too
-// when it is a generation model.
-func channelHealthCheckTarget(channel *model.Channel) (string, bool) {
-	if channel.TestModel != nil {
-		if pinned := strings.TrimSpace(*channel.TestModel); pinned != "" {
-			return pinned, !billableGenerationModel(pinned)
+// testChannelForHealthCheck shares the same safe per-model probes with Test All.
+func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, testUserID int, _ bool) channelTestSummary {
+	// Both the scheduled runner and Test All use this per-model path. A failed
+	// model is parked without disabling the channel or its healthy siblings.
+	before := readModelHealth(channel)
+	_, parked := refreshChannelModels(ctx, channel, testUserID, maxModelProbesPerSweep)
+	summary := channelTestSummary{ModelsDisabled: parked}
+	for name, sample := range readModelHealth(channel) {
+		if sample.Checks <= before[name].Checks {
+			continue
 		}
-	}
-	for _, model := range channel.GetModels() {
-		if !billableGenerationModel(model) {
-			return model, true
-		}
-	}
-	return "", false
-}
-
-// testChannelForHealthCheck runs one health check for a channel. Model health is
-// evaluated per model, so a single unhealthy model can no longer take down a
-// channel whose other models still answer: the channel is disabled only when no
-// model is left to serve it.
-func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, testUserID int, allowDisable bool) channelTestSummary {
-	summary := channelTestSummary{}
-	isChannelEnabled := channel.Status == common.ChannelStatusEnabled
-
-	probeModel, probeAllowed := channelHealthCheckTarget(channel)
-	if !probeAllowed {
-		// Never spend a generation output on a health check, and never change a
-		// channel's state on evidence this check refused to collect.
-		return summary
-	}
-
-	tik := time.Now()
-	result := testChannel(ctx, channel, testUserID, probeModel, "", shouldUseStreamForAutomaticChannelTest(channel))
-	milliseconds := time.Since(tik).Milliseconds()
-	if ctx.Err() != nil {
-		return summary
-	}
-
-	summary.Tested++
-
-	newAPIError := result.newAPIError
-	if newAPIError == nil {
-		summary.Succeeded++
-	} else {
-		summary.Failed++
-	}
-
-	shouldBanChannel := false
-	if isChannelEnabled {
-		if newAPIError != nil && types.IsChannelError(newAPIError) {
-			// A credential level failure cannot be fixed by dropping models.
-			shouldBanChannel = true
+		summary.ModelsTested++
+		if sample.Success {
+			summary.ModelsSucceeded++
 		} else {
-			// Whether the probe passed or failed, refresh model availability first:
-			// routing must only offer models that answered, and a failure caused by
-			// one bad model must not close the whole channel.
-			usable, parked := refreshChannelModels(ctx, channel, testUserID, maxModelProbesPerSweep)
-			summary.ModelsDisabled = parked
-			shouldBanChannel = newAPIError != nil && usable == 0
+			summary.ModelsFailed++
 		}
 	}
-
-	if allowDisable && isChannelEnabled && shouldBanChannel && channel.GetAutoBan() {
-		processChannelError(result.context, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(result.context, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, nil)
-		summary.Disabled++
-	}
-
-	if result.localErr == nil && !isChannelEnabled && service.ShouldEnableChannel(newAPIError, channel.Status) {
-		service.EnableChannel(channel.Id, common.GetContextKeyString(result.context, constant.ContextKeyChannelKey), channel.Name)
+	if summary.ModelsSucceeded > 0 && service.ShouldEnableChannel(nil, channel.Status) {
+		service.EnableChannel(channel.Id, "", channel.Name)
 		summary.Enabled++
 	}
-
-	channel.UpdateResponseTime(milliseconds)
+	if summary.ModelsTested > 0 {
+		summary.Tested = 1
+		if summary.ModelsFailed > 0 {
+			summary.Failed = 1
+		} else {
+			summary.Succeeded = 1
+		}
+	}
 	return summary
 }
 
 // billableGenerationModel reports whether a model name routes to an endpoint
 // that spends real money on generation (image / video / speech). Those are never
 // exercised by the automatic model health check, because generating an output
-// would incur upstream cost; they keep whatever state they already have.
+// would incur upstream cost; only their free discovery endpoint is checked.
 func billableGenerationModel(model string) bool {
 	lower := strings.ToLower(model)
 	for _, marker := range [...]string{
 		// Image generation.
 		"image", "dall-e", "dall_e", "seedream", "flux", "stable-diffusion",
-		"stable_diffusion", "midjourney", "mj-", "banana",
+		"stable_diffusion", "midjourney", "mj-", "banana", "nana", "imagine", "cogview", "recraft", "ideogram", "picture", "photo",
 		// Video generation.
 		"video", "sora", "veo", "kling", "vidu", "jimeng", "seedance",
-		"wan2", "wanx", "hailuo", "pika", "runway", "luma", "pixverse", "t2v", "i2v",
+		"sd2.", "wan2", "wanx", "hailuo", "pika", "runway", "luma", "pixverse", "t2v", "i2v",
 		// Audio and speech.
 		"tts", "whisper", "speech", "voice", "audio", "music", "suno",
 	} {
@@ -1064,18 +1011,9 @@ func billableGenerationModel(model string) bool {
 // at a rotating offset, so successive cycles still cover the whole list.
 const maxModelProbesPerSweep = 20
 
-// maxModelProbesPerManualTest and manualModelProbeBudget keep the manual
-// connection test responsive: a click answers the probe the caller asked for and
-// then refreshes a bounded slice of the model list. The automatic cycle keeps
-// covering the rest of the list.
-const (
-	maxModelProbesPerManualTest = 20
-	manualModelProbeBudget      = 60 * time.Second
-)
-
 // maxModelFailuresBeforeParking is how many consecutive probe failures a routed
-// model may accumulate. The next failure parks it, so a model that fails
-// transiently keeps serving.
+// model may accumulate before it is parked. Transient failures below this
+// threshold keep serving.
 const maxModelFailuresBeforeParking = 3
 
 // modelProbeFunc probes one model of a channel and returns the upstream error,
@@ -1093,6 +1031,7 @@ type modelProbeSweep struct {
 	// Complete reports whether the sweep ran to the end; a cancelled sweep must
 	// not be persisted.
 	Complete bool
+	Health   map[string]modelHealthSample
 }
 
 // readChannelDisabledModels returns the models parked by an earlier sweep.
@@ -1130,8 +1069,7 @@ func readChannelModelFailures(channel *model.Channel) map[string]int {
 // answer. A routed model is parked once it failed more than
 // maxModelFailuresBeforeParking consecutive probes, and a parked model that
 // answers is routed again. Models the sweep does not reach keep their current
-// state. Billable generation models are never probed, because producing an
-// output would be charged, and they keep whatever state they already have.
+// state. Media models are checked through the safe free-directory probe.
 func sweepChannelModels(ctx context.Context, channel *model.Channel, probe modelProbeFunc, limit int) modelProbeSweep {
 	current := channel.GetModels()
 	parked := readChannelDisabledModels(channel)
@@ -1161,10 +1099,6 @@ func sweepChannelModels(ctx context.Context, channel *model.Channel, probe model
 			rest = append(rest, model)
 		}
 	}
-	if len(ordered)+len(rest) > limit {
-		offset := int(common.GetTimestamp()/60) % len(rest)
-		rest = append(append(make([]string, 0, len(rest)), rest[offset:]...), rest[:offset]...)
-	}
 	ordered = append(ordered, rest...)
 
 	routed := make(map[string]bool, len(current))
@@ -1172,6 +1106,8 @@ func sweepChannelModels(ctx context.Context, channel *model.Channel, probe model
 		routed[model] = true
 	}
 
+	health := readModelHealth(channel)
+	slices.SortStableFunc(ordered, func(a, b string) int { return cmp.Compare(health[a].CheckedAt, health[b].CheckedAt) })
 	answered := make(map[string]bool, limit)
 	for _, model := range ordered {
 		if len(answered) >= limit {
@@ -1187,10 +1123,14 @@ func sweepChannelModels(ctx context.Context, channel *model.Channel, probe model
 				return modelProbeSweep{}
 			}
 		}
-		if billableGenerationModel(model) {
+		if sample := health[model]; sample.CheckedAt > 0 && time.Now().Unix()-sample.CheckedAt < int64(modelHealthInterval/time.Second) {
 			continue
 		}
-		ok := probe(ctx, model) == nil
+		probeErr := probe(ctx, model)
+		if probeErr == modelProbeUnverified {
+			continue
+		}
+		ok := probeErr == nil
 		answered[model] = ok
 		if ok {
 			delete(failures, model)
@@ -1205,7 +1145,7 @@ func sweepChannelModels(ctx context.Context, channel *model.Channel, probe model
 	// drops or restores models does not churn the string.
 	sweep := modelProbeSweep{Complete: true}
 	for _, model := range current {
-		if ok, reached := answered[model]; reached && !ok && failures[model] > maxModelFailuresBeforeParking {
+		if ok, reached := answered[model]; reached && !ok && failures[model] >= maxModelFailuresBeforeParking {
 			sweep.Disabled = append(sweep.Disabled, model)
 			continue
 		}
@@ -1247,6 +1187,10 @@ func persistModelSweep(channel *model.Channel, sweep modelProbeSweep) {
 
 	newInfo := channel.GetOtherInfo()
 	infoChanged := false
+	if sweep.Health != nil && !maps.Equal(readModelHealth(channel), sweep.Health) {
+		newInfo["model_health"] = sweep.Health
+		infoChanged = true
+	}
 	if len(sweep.Disabled) == 0 {
 		if _, present := newInfo["disabled_models"]; present {
 			delete(newInfo, "disabled_models")
@@ -1265,37 +1209,44 @@ func persistModelSweep(channel *model.Channel, sweep modelProbeSweep) {
 		newInfo["model_failures"] = sweep.Failures
 		infoChanged = true
 	}
+	next := *channel
 	if infoChanged {
-		channel.SetOtherInfo(newInfo)
-		updates["other_info"] = channel.OtherInfo
+		next.SetOtherInfo(newInfo)
+		updates["other_info"] = next.OtherInfo
 	}
 
 	if len(updates) == 0 {
 		return
 	}
-	if err := model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Updates(updates).Error; err != nil {
+	modelsChanged := next.Models != strings.Join(sweep.Alive, ",")
+	next.Models = strings.Join(sweep.Alive, ",")
+	if err := model.SaveChannelHealthState(channel, next.Models, next.OtherInfo); err != nil {
 		common.SysError(common.LogText("model health check: failed to persist channel %d: %v", channel.Id, err))
 		return
 	}
-	if storedModels, ok := updates["models"].(string); ok {
-		channel.Models = storedModels
-	}
-	if _, modelsChanged := updates["models"]; modelsChanged {
-		if err := channel.UpdateAbilities(nil); err != nil {
-			common.SysError(common.LogText("model health check: failed to update abilities for channel %d: %v", channel.Id, err))
-		}
+	if modelsChanged {
 		model.InitChannelCache()
 	}
+
 }
 
 // refreshChannelModels sweeps the channel's models with real upstream probes and
 // persists the result, so routing only offers models that answered. It returns
 // how many models stay usable and how many are parked.
 func refreshChannelModels(ctx context.Context, channel *model.Channel, testUserID int, limit int) (usable, parked int) {
-	probe := func(ctx context.Context, model string) *types.NewAPIError {
-		return testChannel(ctx, channel, testUserID, model, "", false).newAPIError
+	if _, running := modelHealthRunning.LoadOrStore(channel.Id, true); running {
+		return len(channel.GetModels()), len(readChannelDisabledModels(channel))
 	}
+	defer modelHealthRunning.Delete(channel.Id)
+	latest, err := model.GetChannelById(channel.Id, true)
+	if err != nil {
+		return len(channel.GetModels()), len(readChannelDisabledModels(channel))
+	}
+	*channel = *latest
+	health := readModelHealth(channel)
+	probe := newSafeModelHealthProbe(channel, testUserID, health, "", shouldUseStreamForAutomaticChannelTest(channel))
 	sweep := sweepChannelModels(ctx, channel, probe, limit)
+	sweep.Health = health
 	if !sweep.Complete {
 		// Never persist a partial sweep during shutdown.
 		return len(channel.GetModels()), len(readChannelDisabledModels(channel))
@@ -1393,6 +1344,9 @@ func runChannelTestWorkers(
 		summary.Disabled += result.Disabled
 		summary.Enabled += result.Enabled
 		summary.ModelsDisabled += result.ModelsDisabled
+		summary.ModelsTested += result.ModelsTested
+		summary.ModelsSucceeded += result.ModelsSucceeded
+		summary.ModelsFailed += result.ModelsFailed
 		processed++
 		if report != nil && ctx.Err() == nil {
 			report(processed, total)
@@ -1459,7 +1413,7 @@ func selectChannelsForAutomaticTest(channels []*model.Channel, mode string) []*m
 		if mode == operation_setting.ChannelTestModeAutoBanOnly && !channel.GetAutoBan() {
 			continue
 		}
-		if mode == operation_setting.ChannelTestModePassiveRecovery && channel.Status != common.ChannelStatusAutoDisabled {
+		if mode == operation_setting.ChannelTestModePassiveRecovery && channel.Status != common.ChannelStatusAutoDisabled && len(readChannelDisabledModels(channel)) == 0 && len(readChannelModelFailures(channel)) == 0 {
 			continue
 		}
 		selected = append(selected, channel)

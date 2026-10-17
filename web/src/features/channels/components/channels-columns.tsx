@@ -49,6 +49,7 @@ import {
 import { toIntlLocale } from '@/i18n/languages'
 import {
   formatCurrencyFromUSD,
+  formatUSDAmount,
   formatQuotaWithCurrency,
   getCurrencyLabel,
 } from '@/lib/currency'
@@ -353,6 +354,9 @@ export function BalanceCell({ channel }: { channel: Channel }) {
   const [codexUsageOpen, setCodexUsageOpen] = useState(false)
   const [codexUsageResponse, setCodexUsageResponse] =
     useState<CodexUsageDialogData | null>(null)
+  // The balance adapter stores DeepSeek balance in USD; local consumed quota uses wallet units.
+  const formatRemaining =
+    channel.type === 43 ? formatUSDAmount : formatCurrencyFromUSD
   const currencyLabel = getCurrencyLabel()
   const tokenSuffix = currencyLabel === 'Tokens' ? ' Tokens' : ''
   const withSuffix = (value: string) =>
@@ -363,7 +367,7 @@ export function BalanceCell({ channel }: { channel: Channel }) {
     digitsLarge: 2,
     digitsSmall: 4,
     abbreviate: false,
-    showSymbol: layout !== 'card',
+    showSymbol: channel.type === 43 || layout !== 'card',
   } as const
   // Precise values are kept for the tooltip; long values are shown compactly inline.
   const usedFull = withSuffix(
@@ -374,9 +378,10 @@ export function BalanceCell({ channel }: { channel: Channel }) {
       showSymbol: layout !== 'card',
     })
   )
-  const remainingFull = withSuffix(
-    formatCurrencyFromUSD(balance, balanceFormatOptions)
-  )
+  const remainingFull =
+    channel.type === 43
+      ? formatRemaining(balance, balanceFormatOptions)
+      : withSuffix(formatRemaining(balance, balanceFormatOptions))
   const usedDisplay =
     usedFull.length > MAX_INLINE_BALANCE_CHARS
       ? withSuffix(
@@ -389,13 +394,11 @@ export function BalanceCell({ channel }: { channel: Channel }) {
       : usedFull
   const remainingDisplay =
     remainingFull.length > MAX_INLINE_BALANCE_CHARS
-      ? withSuffix(
-          formatCurrencyFromUSD(balance, {
-            compact: true,
-            locale,
-            showSymbol: layout !== 'card',
-          })
-        )
+      ? formatRemaining(balance, {
+          compact: true,
+          locale,
+          showSymbol: channel.type === 43 || layout !== 'card',
+        }) + (channel.type === 43 ? '' : tokenSuffix)
       : remainingFull
   const usedLabel = `${t('Used:')} ${usedFull}`
   const remainingLabel = `${t('Remaining:')} ${remainingFull}`
@@ -470,7 +473,7 @@ export function BalanceCell({ channel }: { channel: Channel }) {
       if (response.success && response.balance !== undefined) {
         toast.success(
           t('Balance updated: {{balance}}', {
-            balance: formatCurrencyFromUSD(response.balance, {
+            balance: formatRemaining(response.balance, {
               digitsLarge: 2,
               digitsSmall: 4,
               abbreviate: false,

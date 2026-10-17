@@ -46,6 +46,7 @@ import {
   sideDrawerHeaderClassName,
 } from '@/components/drawer-layout'
 import { EmptyState } from '@/components/empty-state'
+import { GroupBadge } from '@/components/group-badge'
 import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -81,6 +82,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { toIntlLocale } from '@/i18n/languages'
 import { formatNumber } from '@/lib/format'
+import { useGroupLabelStore } from '@/stores/group-label-store'
 
 import { safeJsonParse } from '../utils/json-parser'
 import { GroupSpecialUsableRulesEditor } from './group-special-usable-editor'
@@ -92,6 +94,7 @@ export type GroupSettingsSection =
   | 'auto'
 
 type GroupRatioVisualEditorProps = {
+  lockGroupIDs?: boolean
   section: GroupSettingsSection
   onSectionChange: (section: GroupSettingsSection) => void
   defaultUseAutoGroupField: ReactNode
@@ -245,6 +248,7 @@ type GroupNameSelectProps = {
 }
 
 function GroupNameSelect(props: GroupNameSelectProps) {
+  const labels = useGroupLabelStore((s) => s.labels)
   const options = useMemo(() => {
     if (props.value && !props.options.includes(props.value)) {
       return [props.value, ...props.options]
@@ -254,7 +258,10 @@ function GroupNameSelect(props: GroupNameSelectProps) {
 
   return (
     <Combobox
-      options={options.map((name) => ({ value: name, label: name }))}
+      options={options.map((name) => ({
+        value: name,
+        label: labels[name]?.name || name,
+      }))}
       value={props.value}
       onValueChange={(value) => {
         if (value) props.onValueChange(value)
@@ -268,6 +275,7 @@ function GroupNameSelect(props: GroupNameSelectProps) {
 
 export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
   section,
+  lockGroupIDs = false,
   onSectionChange,
   defaultUseAutoGroupField,
   groupRatio,
@@ -367,6 +375,7 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
       </div>
       <TabsContent value='pricing' keepMounted>
         <GroupPricingTable
+          lockGroupIDs={lockGroupIDs}
           groupRatio={groupRatio}
           userUsableGroups={userUsableGroups}
           topupGroupRatio={topupGroupRatio}
@@ -472,6 +481,7 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
 })
 
 type GroupPricingTableProps = {
+  lockGroupIDs?: boolean
   groupRatio: string
   userUsableGroups: string
   topupGroupRatio: string
@@ -480,6 +490,7 @@ type GroupPricingTableProps = {
 }
 
 function GroupPricingTable({
+  lockGroupIDs = false,
   groupRatio,
   userUsableGroups,
   topupGroupRatio,
@@ -591,14 +602,18 @@ function GroupPricingTable({
             <CardTitle>{t('Pricing groups')}</CardTitle>
             <CardDescription>
               {t(
-                'All group names live here. Ratio applies when calls are billed as this group; top-up ratio applies to users whose account is in this group.'
+                lockGroupIDs
+                  ? 'Edit group names in Group management. Fixed IDs cannot be changed here.'
+                  : 'All group names live here. Ratio applies when calls are billed as this group; top-up ratio applies to users whose account is in this group.'
               )}
             </CardDescription>
           </div>
-          <Button onClick={addRow} size='sm' className='sm:self-start'>
-            <Plus className='mr-2 h-4 w-4' />
-            {t('Add group')}
-          </Button>
+          {!lockGroupIDs && (
+            <Button onClick={addRow} size='sm' className='sm:self-start'>
+              <Plus className='mr-2 h-4 w-4' />
+              {t('Add group')}
+            </Button>
+          )}
         </div>
       </CardHeader>
       <CardContent>
@@ -655,19 +670,35 @@ function GroupPricingTable({
             columns={[
               {
                 id: 'group',
-                header: t('Group name'),
+                header: t(lockGroupIDs ? 'ID' : 'Group name'),
                 className: 'min-w-40',
                 cell: (row) => (
-                  <Input
-                    value={row.name}
-                    aria-label={t('Group name')}
-                    onChange={(event) =>
-                      updateRow(row._id, 'name', event.target.value)
-                    }
-                    aria-invalid={duplicateNames.includes(row.name.trim())}
-                  />
+                  <div>
+                    <Input
+                      readOnly={lockGroupIDs}
+                      value={row.name}
+                      aria-label={t(
+                        lockGroupIDs ? 'Fixed group ID' : 'Group name'
+                      )}
+                      onChange={(event) =>
+                        updateRow(row._id, 'name', event.target.value)
+                      }
+                      aria-invalid={duplicateNames.includes(row.name.trim())}
+                    />
+                  </div>
                 ),
               },
+              ...(lockGroupIDs
+                ? [
+                    {
+                      id: 'display-name',
+                      header: t('Group name'),
+                      cell: (row: GroupPricingRow) => (
+                        <GroupBadge group={row.name} />
+                      ),
+                    },
+                  ]
+                : []),
               {
                 id: 'ratio',
                 header: t('Ratio'),
@@ -755,14 +786,16 @@ function GroupPricingTable({
                     >
                       <Info className='h-4 w-4' />
                     </Button>
-                    <Button
-                      variant='ghost'
-                      size='sm'
-                      onClick={() => removeRow(row._id)}
-                      aria-label={t('Delete')}
-                    >
-                      <Trash2 className='h-4 w-4' />
-                    </Button>
+                    {row.name !== 'default' && (
+                      <Button
+                        variant='ghost'
+                        size='sm'
+                        onClick={() => removeRow(row._id)}
+                        aria-label={t('Delete')}
+                      >
+                        <Trash2 className='h-4 w-4' />
+                      </Button>
+                    )}
                   </div>
                 ),
               },

@@ -350,20 +350,31 @@ it('synchronizes only the selected channel, preserving other sources and global 
     channelSource(7, 'Happy main', 0.2),
     channelSource(8, 'Happy backup', 0.24),
   ]
-  const get = vi
-    .spyOn(api, 'get')
-    .mockResolvedValue({ data: { success: true, data: sources } })
+  const get = vi.spyOn(api, 'get').mockImplementation(async (url) => ({
+    data: {
+      success: true,
+      data:
+        url === '/api/channel/price-sources'
+          ? {
+              version: 'v1',
+              sources: [{ id: 'happyapi', price_currency: 'CREDIT' }],
+            }
+          : sources,
+    },
+  }))
   const post = vi
     .spyOn(api, 'post')
     .mockResolvedValue({ data: { success: true } })
   const patch = vi.spyOn(api, 'patch')
   renderChannelSync()
   const user = userEvent.setup()
-  const selector = await screen.findByRole('combobox', { name: 'Price source' })
+  const selector = await screen.findByRole('combobox', {
+    name: 'Channel / Price source',
+  })
   expect(screen.queryByRole('table')).not.toBeInTheDocument()
   await user.click(selector)
   await user.click(
-    await screen.findByRole('option', { name: 'Happy main #7 · HappyAPI' })
+    await screen.findByRole('option', { name: 'Happy main ← HappyAPI #7' })
   )
   expect(screen.getAllByRole('table')).toHaveLength(1)
   expect(screen.getByText('¥0.2')).toBeVisible()
@@ -377,22 +388,33 @@ it('synchronizes only the selected channel, preserving other sources and global 
   await waitFor(() => expect(selector).toBeEnabled())
   await user.click(selector)
   await user.click(
-    await screen.findByRole('option', { name: 'Happy backup #8 · HappyAPI' })
+    await screen.findByRole('option', { name: 'Happy backup ← HappyAPI #8' })
   )
   expect(screen.getAllByRole('table')).toHaveLength(1)
   expect(screen.getByText('¥0.24')).toBeVisible()
   expect(screen.queryByText('¥0.2')).not.toBeInTheDocument()
   expect(post).toHaveBeenCalledTimes(1)
   expect(patch).not.toHaveBeenCalled()
-  expect(get.mock.calls.every(([url]) => url === '/api/channel/costs')).toBe(
-    true
-  )
+  expect(
+    get.mock.calls.every(([url]) =>
+      ['/api/channel/costs', '/api/channel/price-sources'].includes(url)
+    )
+  ).toBe(true)
 })
 
 it('keeps a failed source scoped to the same channel when retrying', async () => {
-  vi.spyOn(api, 'get').mockResolvedValue({
-    data: { success: true, data: [channelSource(7, 'Happy', 0.2)] },
-  })
+  vi.spyOn(api, 'get').mockImplementation(async (url) => ({
+    data: {
+      success: true,
+      data:
+        url === '/api/channel/price-sources'
+          ? {
+              version: 'v1',
+              sources: [{ id: 'happyapi', price_currency: 'CREDIT' }],
+            }
+          : [channelSource(7, 'Happy', 0.2)],
+    },
+  }))
   const post = vi
     .spyOn(api, 'post')
     .mockResolvedValueOnce({
@@ -402,10 +424,10 @@ it('keeps a failed source scoped to the same channel when retrying', async () =>
   renderChannelSync()
   const user = userEvent.setup()
   await user.click(
-    await screen.findByRole('combobox', { name: 'Price source' })
+    await screen.findByRole('combobox', { name: 'Channel / Price source' })
   )
   await user.click(
-    await screen.findByRole('option', { name: 'Happy #7 · HappyAPI' })
+    await screen.findByRole('option', { name: 'Happy ← HappyAPI #7' })
   )
   await user.click(
     screen.getByRole('button', { name: 'Synchronize channel prices' })

@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting/config"
@@ -85,6 +86,14 @@ func seedHardcodedToolPrices(prices map[string]float64) {
 	prices["web_search:grok*"] = 5
 	prices["x_search_posts"] = 5
 	prices["x_search_profiles"] = 10
+
+	// DeepSeek Search and Fetch APIs, $0.75 per 1,000 successful requests
+	// each (https://api-docs.deepseek.com/quick_start/pricing), for the
+	// searches and page fetches DeepSeek runs server-side for Claude Code and
+	// Codex traffic. /v1/tools/search and /v1/tools/fetch bill through the
+	// deepseek-search and deepseek-fetch model prices instead.
+	prices["deepseek_search"] = 0.75
+	prices["deepseek_fetch"] = 0.75
 }
 
 // ToolPriceSetting is managed by config.GlobalConfig.Register.
@@ -130,8 +139,9 @@ type prefixEntry struct {
 }
 
 type toolPriceIndex struct {
-	defaults map[string]float64
-	prefixes map[string][]prefixEntry
+	defaults  map[string]float64
+	prefixes  map[string][]prefixEntry
+	freeUntil map[string]time.Time
 }
 
 var currentIndex atomic.Pointer[toolPriceIndex]
@@ -211,8 +221,19 @@ func RebuildToolPriceIndex() {
 	}
 
 	idx := &toolPriceIndex{
-		defaults: make(map[string]float64),
-		prefixes: make(map[string][]prefixEntry),
+		defaults:  make(map[string]float64),
+		prefixes:  make(map[string][]prefixEntry),
+		freeUntil: make(map[string]time.Time),
+	}
+	// Hosted Search/Fetch calls are free until 2026-11-01 00:00 Beijing time.
+	// https://api-docs.deepseek.com/guides/search/
+	// Keep the list price in the index and apply the deadline on lookup so a
+	// running server switches without a restart. Explicit operator prices win.
+	for _, name := range []string{"deepseek_search", "deepseek_fetch"} {
+		price, configured := toolPriceSetting.Prices[name]
+		if !configured || !isValidToolPrice(price) {
+			idx.freeUntil[name] = time.Date(2026, time.October, 31, 16, 0, 0, 0, time.UTC)
+		}
 	}
 
 	for key, price := range merged {
@@ -252,7 +273,10 @@ func GetToolPriceForModel(toolName, modelName string) float64 {
 			return 0
 		}
 	}
+	return idx.priceForModel(toolName, modelName, time.Now())
+}
 
+func (idx *toolPriceIndex) priceForModel(toolName, modelName string, now time.Time) float64 {
 	if entries, ok := idx.prefixes[toolName]; ok && modelName != "" {
 		for _, e := range entries {
 			if strings.HasPrefix(modelName, e.prefix) {
@@ -262,6 +286,9 @@ func GetToolPriceForModel(toolName, modelName string) float64 {
 	}
 
 	if p, ok := idx.defaults[toolName]; ok {
+		if deadline, free := idx.freeUntil[toolName]; free && now.Before(deadline) {
+			return 0
+		}
 		return p
 	}
 	return 0

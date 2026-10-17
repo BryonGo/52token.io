@@ -6,12 +6,14 @@ package i18n
 
 // Errors returned to AI clients
 const (
-	MsgDatabaseError          = "common.database_error"
-	MsgAuthUserBanned         = "auth.user_banned"
-	MsgTokenGetInfoFailed     = "token.get_info_failed"
-	MsgTokenInvalid           = "token.invalid"
-	MsgTokenNotProvided       = "token.not_provided"
-	MsgTokenStatusUnavailable = "token.status_unavailable"
+	MsgDatabaseError                 = "common.database_error"
+	MsgAuthUserBanned                = "auth.user_banned"
+	MsgTokenGetInfoFailed            = "token.get_info_failed"
+	MsgTokenInvalid                  = "token.invalid"
+	MsgTokenNotProvided              = "token.not_provided"
+	MsgTokenStatusUnavailable        = "token.status_unavailable"
+	MsgCatalogPricingIDNotFound      = "catalog.pricing_id_not_found"
+	MsgCatalogTemporarilyUnavailable = "catalog.temporarily_unavailable"
 
 	MsgAuthClientIPUnresolved     = "auth.client_ip_unresolved"
 	MsgAuthTokenIPNotAllowed      = "auth.token_ip_not_allowed"
@@ -63,6 +65,25 @@ const (
 	MsgEmailPasswordResetLink         = "email.password_reset.link"
 	MsgEmailPasswordResetLinkFallback = "email.password_reset.link_fallback"
 	MsgEmailPasswordResetValidity     = "email.password_reset.validity"
+
+	MsgEmailBindingSubject     = "email.binding.subject"
+	MsgEmailBindingNewIntro    = "email.binding.new_intro"
+	MsgEmailBindingOldIntro    = "email.binding.old_intro"
+	MsgEmailBindingCode        = "email.binding.code"
+	MsgEmailBindingNewValidity = "email.binding.new_validity"
+	MsgEmailBindingOldValidity = "email.binding.old_validity"
+
+	MsgEmailSecurityNoticeSubject = "email.security_notice.subject"
+	MsgEmailSecurityNoticeChanged = "email.security_notice.changed"
+	MsgEmailSecurityNoticeAdvice  = "email.security_notice.advice"
+
+	MsgSecurityEventPasswordUpdated      = "email.security_event.password_updated"
+	MsgSecurityEventEmailChangeRequested = "email.security_event.email_change_requested"
+	MsgSecurityEventEmailChanged         = "email.security_event.email_changed"
+	MsgSecurityEventEmailConfirmed       = "email.security_event.email_confirmed"
+	MsgSecurityEventLoginLinked          = "email.security_event.login_linked"
+	MsgSecurityEventLoginUnlinked        = "email.security_event.login_unlinked"
+	MsgSecurityEventWeChatLinked         = "email.security_event.wechat_linked"
 )
 
 // Low-quota notices, in the recipient's saved language
@@ -74,7 +95,8 @@ const (
 	MsgNotifyQuotaLowEmail             = "notify.quota_low_email"
 )
 
-// Channel notices sent to the root user and model update watchers
+// Channel notices sent to administrators who receive them and to model update
+// watchers
 const (
 	MsgChannelNotifyDisabledSubject = "channel.notify_disabled_subject"
 	MsgChannelNotifyDisabledContent = "channel.notify_disabled_content"

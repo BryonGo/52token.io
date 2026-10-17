@@ -4,6 +4,7 @@ import (
 	"maps"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -59,7 +60,37 @@ func TestToolPriceHardcodedFallbacksSurviveMissingOperatorConfig(t *testing.T) {
 		assert.Equal(t, tt.want, GetToolPriceForModel(tt.tool, tt.model), "%s for %q", tt.tool, tt.model)
 	}
 	assert.True(t, IsBuiltInToolPriceKey("bing_web_search"))
+	assert.True(t, IsBuiltInToolPriceKey("deepseek_fetch"))
 	assert.True(t, IsBuiltInToolPriceKey("google_search_grounded_prompt"), "seeded only for model prefixes")
+}
+
+func TestDeepSeekHostedToolFreePeriodAndOverrides(t *testing.T) {
+	preserveToolPrices(t)
+	for _, tc := range []struct {
+		name, tool, model string
+		prices            map[string]float64
+		before, after     float64
+	}{
+		{name: "search default", tool: "deepseek_search", after: 0.75},
+		{name: "fetch default", tool: "deepseek_fetch", after: 0.75},
+		{name: "hosted model", tool: "deepseek_search", model: "claude-sonnet-4-5", after: 0.75},
+		{name: "operator default", tool: "deepseek_search", prices: map[string]float64{"deepseek_search": 0.2}, before: 0.2, after: 0.2},
+		{name: "operator zero", tool: "deepseek_fetch", prices: map[string]float64{"deepseek_fetch": 0}},
+		{name: "operator model prefix", tool: "deepseek_search", model: "custom-v1", prices: map[string]float64{"deepseek_search:custom*": 0.4}, before: 0.4, after: 0.4},
+		{name: "unmatched prefix", tool: "deepseek_search", model: "other", prices: map[string]float64{"deepseek_search:custom*": 0.4}, after: 0.75},
+		{name: "invalid override", tool: "deepseek_search", prices: map[string]float64{"deepseek_search": math.NaN()}, after: 0.75},
+		{name: "other provider unchanged", tool: "web_search", before: 10, after: 10},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			toolPriceSetting.Prices = tc.prices
+			RebuildToolPriceIndex()
+			index := currentIndex.Load()
+			require.NotNil(t, index)
+			assert.Equal(t, tc.before, index.priceForModel(tc.tool, tc.model, time.Date(2026, 10, 31, 15, 59, 59, 0, time.UTC)))
+			assert.Equal(t, tc.after, index.priceForModel(tc.tool, tc.model, time.Date(2026, 10, 31, 16, 0, 0, 0, time.UTC)))
+			assert.Equal(t, tc.after, index.priceForModel(tc.tool, tc.model, time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)))
+		})
+	}
 }
 
 func TestToolPriceOperatorOverridePrecedenceAndExplicitZero(t *testing.T) {
